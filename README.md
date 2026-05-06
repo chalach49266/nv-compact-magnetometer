@@ -4,7 +4,7 @@ NV-center compact magnetometer running on RFSoC4x2 + qick-dawg. Includes lock-in
 
 ## Repository layout
 
-The project uses a **flat layout** (notebooks and Python modules at the top level) so the notebooks' `from twopoint_lockin import ...` style imports just work without any `sys.path` setup.
+Python modules live at the top level and are auto-discovered by every notebook via a `PROJECT_ROOT` setup cell, so `from twopoint_lockin import ...` works regardless of which notebook subfolder you're in.
 
 ```text
 nv_magnetometer_project/
@@ -12,30 +12,63 @@ nv_magnetometer_project/
 ├── pyproject.toml                              package metadata + abstract dependencies
 ├── requirements.txt                            pinned versions from working venv (qickdawg_venv, Python 3.13.5)
 ├── .gitignore
-├── 01_basic_nv_testing.ipynb                   main workflow notebook
-├── 01b_noise_cancelled_nv_testing.ipynb
-├── 01c_dual_channel_fast_pl_validation.ipynb
-├── 01e_dual_channel_fast_pl_outlier_aware_workflow.ipynb
-├── 02_microwave_fixed_frequency.ipynb
-├── 02_rabi_vector_magnetometry.ipynb
-├── 02b_noise_cancelled_rabi_vector_magnetometry.ipynb
-├── Plot and sensitivity_csv.ipynb
+│
+├── notebooks/                                  All Jupyter notebooks, grouped by experiment
+│   ├── 01_basic_nv_testing/
+│   │   ├── 01_basic_nv_testing.ipynb           main workflow (ODMR + lock-in + multipoint)
+│   │   └── 01b_noise_cancelled_nv_testing.ipynb
+│   ├── 01_dual_channel_pl/
+│   │   ├── 01c_dual_channel_fast_pl_validation.ipynb
+│   │   └── 01e_dual_channel_fast_pl_outlier_aware_workflow.ipynb
+│   ├── 02_microwave_rabi/
+│   │   ├── 02_microwave_fixed_frequency.ipynb
+│   │   ├── 02_rabi_vector_magnetometry.ipynb
+│   │   └── 02b_noise_cancelled_rabi_vector_magnetometry.ipynb
+│   └── 03_analysis/
+│       └── Plot and sensitivity_csv.ipynb
+│
+├── Modules/                                    Reusable measurement modules (importable + interactive)
+│   ├── Lockin_module.ipynb                     plan → acquire (one FPGA upload) → reconstruct
+│   ├── ODMR_module.ipynb
+│   ├── PL_readout_module.ipynb
+│   └── multipoint_lockin_program.py            MultipointLockinODMR (one-program N-frequency lock-in)
+│
 ├── twopoint_lockin.py                          run_twopoint_lockin / single_shot_twopoint
 ├── odmr_sensitivity.py                         ODMR Lorentzian fits, sensitivity estimates
 ├── lockin_extensions.py                        sinusoidal FM, feedback, slope analysis
 ├── nv_magnetometry_analysis.py                 standalone analysis script
-├── *.csv                                       ODMR sweeps, lock-in time series, parked plans
-├── Modules/
-│   ├── multipoint_lockin_program.py            MultipointLockinODMR (one-program N-frequency lock-in)
-│   ├── Lockin_module.ipynb                     plan → acquire (one FPGA upload) → reconstruct
-│   ├── ODMR_module.ipynb
-│   └── PL_readout_module.ipynb
+│
+├── data/                                       Categorized data store — see data/README.md
+│   ├── odmr_sweeps/                            odmr_sweep_<timestamp>.csv (full ODMR spectra)
+│   ├── lockin_twopoint/                        twopoint, sinewave, feedback time series
+│   ├── lockin_multipoint/                      16-frequency parked acquisitions + parked plans + reconstructed B-field
+│   ├── pl_dual_channel/                        dual-channel PL comparison data
+│   ├── calibration/                            8-peak reference scans
+│   └── results/                                fit JSONs + plots from prior nv_toolkit runs
+│
 ├── docs/                                       markdown notes, change logs, troubleshooting
 ├── scripts/                                    standalone scripts
+│
 └── qick-dawg-patch/                            our modification to upstream qick-dawg
     ├── lockinodmr.py                           full modified file
     └── lockinodmr_offres_reference.patch       unified diff against upstream
 ```
+
+### How notebooks find the project root
+
+Every notebook starts with an auto-injected setup cell:
+
+```python
+import sys
+from pathlib import Path
+_p = Path.cwd().resolve()
+while _p != _p.parent and not (_p / "pyproject.toml").exists():
+    _p = _p.parent
+PROJECT_ROOT = _p
+sys.path.insert(0, str(PROJECT_ROOT))
+```
+
+This walks up from the notebook's directory until it finds `pyproject.toml`, then uses that as the project root for imports and data paths. So you can move notebooks between subfolders freely without breaking anything.
 
 ## Setup — replicating the Python environment
 
