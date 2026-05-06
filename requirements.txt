@@ -86,8 +86,7 @@ python-pptx==1.0.2
 PyYAML==6.0.3
 pyzmq==27.1.0
 qick==0.2.386
-# Editable Git install with no remote (qickdawg==1.2.1)
--e /Users/ckasemtantikul/Documents/PhD/NV Compact Magnetometer/qick-dawg
+-e .
 referencing==0.37.0
 requests==2.32.5
 rfc3339-validator==0.1.4

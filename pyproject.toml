@@ -24,6 +24,10 @@ dependencies = [
     "ipykernel>=6.0",
     "ipywidgets>=8.0",
     "Pyro4>=4.82",
+    "serpent>=1.42",
+    "tqdm>=4.0",
+    "itemattribute>=0.0.5",
+    "qick==0.2.386",
 ]
 
 [project.optional-dependencies]
@@ -33,7 +37,13 @@ dev = [
 ]
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+py-modules = [
+    "lockin_extensions",
+    "nv_magnetometry_analysis",
+    "odmr_sensitivity",
+    "twopoint_lockin",
+]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["qickdawg*", "nv_toolkit*", "phase1*"]

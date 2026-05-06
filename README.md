@@ -37,6 +37,9 @@ nv_magnetometer_project/
 ├── odmr_sensitivity.py                         ODMR Lorentzian fits, sensitivity estimates
 ├── lockin_extensions.py                        sinusoidal FM, feedback, slope analysis
 ├── nv_magnetometry_analysis.py                 standalone analysis script
+├── nv_toolkit/                                  vendored B-field fitting + parked-frequency inversion helpers
+├── qickdawg/                                    vendored patched qick-dawg Python package used by notebooks
+├── phase1/                                      notebook helper module for 8-peak parked-frequency planning
 │
 ├── data/                                       Categorized data store — see data/README.md
 │   ├── odmr_sweeps/                            odmr_sweep_<timestamp>.csv (full ODMR spectra)
@@ -97,35 +100,19 @@ pip install -e .          # installs this project + minimum deps from pyproject.
 
 Option A reproduces the exact package versions that work today. Option B picks the latest compatible versions — use it if you're upgrading.
 
-### Step 2 — install qick and qick-dawg from the upstream repos
+### Step 2 — install qick support
 
-These are vendor libraries (Xilinx Quantum Instruments Control Kit + qick-dawg). They're not pip-published, so install from source:
-
-```bash
-# clone the upstream repos somewhere (e.g., next to this project)
-cd ..
-git clone https://github.com/openquantumhardware/qick.git
-git clone https://github.com/sandialabs/qick-dawg.git
-
-# install both into the active venv
-pip install -e ./qick
-pip install -e ./qick-dawg
-```
-
-### Step 3 — apply the qick-dawg patch
-
-This project depends on a small modification to `qick-dawg/src/qickdawg/nvpulsing/lockinodmr.py` that adds an `odmr_reference_offres_mhz` config flag. The reference shot fires the MW at an explicit off-resonance frequency (default 2650 MHz) instead of relying on gain control, which fixes a persistent leakage issue.
-
-Apply the patch one of two ways:
+`qickdawg` is vendored in this repository, including the local `LockinODMR` patch used by the notebooks. The remaining hardware-control dependency is `qick==0.2.386`, which is listed in both `requirements.txt` and `pyproject.toml`.
 
 ```bash
-# (a) apply the unified diff
-cd ../qick-dawg
-patch -p0 < ../nv_magnetometer_project/qick-dawg-patch/lockinodmr_offres_reference.patch
-
-# (b) or copy the full modified file
-cp ../nv_magnetometer_project/qick-dawg-patch/lockinodmr.py src/qickdawg/nvpulsing/lockinodmr.py
+pip install -e .
 ```
+
+If the RFSoC control environment needs a local editable `qick` checkout instead of the pinned wheel, clone/install only `qick` next to this project.
+
+### Step 3 — qick-dawg patch provenance
+
+This project depends on a small modification to `qickdawg/nvpulsing/lockinodmr.py` that adds an `odmr_reference_offres_mhz` config flag. The reference shot fires the MW at an explicit off-resonance frequency (default 2650 MHz) instead of relying on gain control, which fixes a persistent leakage issue. The old patch files are retained in `qick-dawg-patch/` for provenance, but no manual patch step is required.
 
 ### Step 4 — register the venv with Jupyter
 
@@ -157,4 +144,4 @@ Naively, measuring 16 non-uniform parked frequencies means building 16 separate 
 
 ## Provenance
 
-This is a copy of the Python source tree from `<phd>/NV Compact Magnetometer/Initial Test/` (notebooks, modules) plus the modified `qick-dawg` vendor file. The originals remain in place; this folder is the canonical version for git tracking.
+This is a copy of the Python source tree from `<phd>/NV Compact Magnetometer/Initial Test/` (notebooks, modules), the patched `qickdawg` package, and the `nv_toolkit` modules used by the parked-frequency reconstruction notebooks. The originals remain in place; this folder is the canonical version for git tracking.
