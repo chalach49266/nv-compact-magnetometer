@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nv-compact-magnetometer"
+version = "0.1.0"
+description = "NV center compact magnetometer — lock-in modulation, multipoint parked-frequency acquisition, and B-field reconstruction on RFSoC4x2."
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+authors = [
+    {name = "Chalach Kasemtantikul", email = "chalach49266@gmail.com"},
+]
+license = {text = "Proprietary"}
+keywords = ["nv-center", "magnetometer", "odmr", "lock-in", "qick", "rfsoc"]
+
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "matplotlib>=3.6",
+    "jupyter>=1.0",
+    "ipython>=8.0",
+    "ipykernel>=6.0",
+    "ipywidgets>=8.0",
+    "Pyro4>=4.82",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.1.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.installed.cfg
+*.egg
+build/
+dist/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+qickdawg_venv/
+qickdawg_py310/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Data — uncomment to exclude large CSVs
+# data/*.csv
+
+# Compiled docs / build artifacts
+docs/_build/
+*.bit
+
+# Temporary
+tmp/
+*.tmp
+*.log
