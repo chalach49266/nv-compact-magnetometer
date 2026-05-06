@@ -1,0 +1,85 @@
+{
+  "source_csv": "Initial Test/8_peaks_8_stacks_new_tdy.csv",
+  "official_repo": "/Users/ckasemtantikul/Documents/PhD/NV Compact Magnetometer/NV_Magnetometry_Software-main",
+  "assumptions": {
+    "workflow": "phase1_april29_raw_mw_on_centers_and_normalized_spectrum_fit",
+    "axis_model": "qdm",
+    "bias_seed_mT": [
+      0.0,
+      0.0,
+      -6.0
+    ],
+    "hyperfine_mode": "fixed",
+    "hyperfine_splitting_mhz": 2.16,
+    "local_field_bounds_mT": 8.0
+  },
+  "detected_transition_centers_mhz": [
+    2764.3141510682526,
+    2796.985519830075,
+    2872.842660039657,
+    2882.98005605391,
+    2952.989002171765,
+    2979.518460909074
+  ],
+  "fit": {
+    "success": 1,
+    "message": "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
+    "cost": 3.5440896019887856e-05,
+    "aic": -8224.589375702728,
+    "B_total_mT": [
+      0.5275560979638382,
+      0.16861041109889366,
+      -6.003031846267171
+    ],
+    "B_total_norm_mT": 6.0285268726719305,
+    "B_local_mT": [
+      0.5275560979638382,
+      0.16861041109889366,
+      -0.003031846267171026
+    ],
+    "B_base_mT": [
+      0.0,
+      0.0,
+      -6.0
+    ],
+    "linewidths_mhz": [
+      [
+        2.998061470618406,
+        2.998061470618406
+      ],
+      [
+        2.9976013835518565,
+        2.9976013835518565
+      ],
+      [
+        2.9980594274806562,
+        2.9980594274806562
+      ],
+      [
+        2.9975998430621087,
+        2.9975998430621087
+      ]
+    ],
+    "contrasts": [
+      [
+        0.00015213597140994214,
+        0.00015213597140994214
+      ],
+      [
+        0.0001,
+        0.0001
+      ],
+      [
+        0.0001,
+        0.0001
+      ],
+      [
+        0.0001,
+        0.0001
+      ]
+    ],
+    "baseline_offset": -0.0006042591712101033,
+    "rmse": 0.000265970508547361,
+    "max_abs_residual": 0.0014143143803272418
+  }
+}
