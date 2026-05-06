@@ -4,37 +4,37 @@ NV-center compact magnetometer running on RFSoC4x2 + qick-dawg. Includes lock-in
 
 ## Repository layout
 
-```
+The project uses a **flat layout** (notebooks and Python modules at the top level) so the notebooks' `from twopoint_lockin import ...` style imports just work without any `sys.path` setup.
+
+```text
 nv_magnetometer_project/
-├── README.md                    this file
-├── pyproject.toml               package metadata + abstract dependencies
-├── requirements.txt             pinned versions from working venv (qickdawg_venv, Python 3.13.5)
+├── README.md                                   this file
+├── pyproject.toml                              package metadata + abstract dependencies
+├── requirements.txt                            pinned versions from working venv (qickdawg_venv, Python 3.13.5)
 ├── .gitignore
-├── notebooks/                   Jupyter notebooks
-│   ├── 01_basic_nv_testing.ipynb              main workflow notebook
-│   ├── 01b_noise_cancelled_nv_testing.ipynb
-│   ├── 01c_dual_channel_fast_pl_validation.ipynb
-│   ├── 01e_dual_channel_fast_pl_outlier_aware_workflow.ipynb
-│   ├── 02_microwave_fixed_frequency.ipynb
-│   ├── 02_rabi_vector_magnetometry.ipynb
-│   ├── 02b_noise_cancelled_rabi_vector_magnetometry.ipynb
-│   ├── Plot and sensitivity_csv.ipynb
-│   └── Modules/
-│       ├── Lockin_module.ipynb                plan → acquire (one FPGA upload) → reconstruct
-│       ├── ODMR_module.ipynb
-│       └── PL_readout_module.ipynb
-├── src/                         Python modules (importable)
-│   ├── multipoint_lockin_program.py    MultipointLockinODMR (one-program N-frequency lock-in)
-│   ├── twopoint_lockin.py              run_twopoint_lockin / single_shot_twopoint
-│   ├── odmr_sensitivity.py             ODMR Lorentzian fits, sensitivity estimates
-│   ├── lockin_extensions.py            sinusoidal FM, feedback, slope analysis
-│   └── nv_magnetometry_analysis.py
-├── data/                        CSV data files (ODMR sweeps, lock-in time series, parked plans)
-├── docs/                        markdown notes, change logs, troubleshooting guides
-├── scripts/                     standalone scripts
-└── qick-dawg-patch/             our modification to upstream qick-dawg
-    ├── lockinodmr.py                   full modified file
-    └── lockinodmr_offres_reference.patch  unified diff against upstream
+├── 01_basic_nv_testing.ipynb                   main workflow notebook
+├── 01b_noise_cancelled_nv_testing.ipynb
+├── 01c_dual_channel_fast_pl_validation.ipynb
+├── 01e_dual_channel_fast_pl_outlier_aware_workflow.ipynb
+├── 02_microwave_fixed_frequency.ipynb
+├── 02_rabi_vector_magnetometry.ipynb
+├── 02b_noise_cancelled_rabi_vector_magnetometry.ipynb
+├── Plot and sensitivity_csv.ipynb
+├── twopoint_lockin.py                          run_twopoint_lockin / single_shot_twopoint
+├── odmr_sensitivity.py                         ODMR Lorentzian fits, sensitivity estimates
+├── lockin_extensions.py                        sinusoidal FM, feedback, slope analysis
+├── nv_magnetometry_analysis.py                 standalone analysis script
+├── *.csv                                       ODMR sweeps, lock-in time series, parked plans
+├── Modules/
+│   ├── multipoint_lockin_program.py            MultipointLockinODMR (one-program N-frequency lock-in)
+│   ├── Lockin_module.ipynb                     plan → acquire (one FPGA upload) → reconstruct
+│   ├── ODMR_module.ipynb
+│   └── PL_readout_module.ipynb
+├── docs/                                       markdown notes, change logs, troubleshooting
+├── scripts/                                    standalone scripts
+└── qick-dawg-patch/                            our modification to upstream qick-dawg
+    ├── lockinodmr.py                           full modified file
+    └── lockinodmr_offres_reference.patch       unified diff against upstream
 ```
 
 ## Setup — replicating the Python environment
