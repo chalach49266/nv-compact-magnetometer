@@ -50,11 +50,7 @@ nv_magnetometer_project/
 │   └── results/                                fit JSONs + plots from prior nv_toolkit runs
 │
 ├── docs/                                       markdown notes, change logs, troubleshooting
-├── scripts/                                    standalone scripts
-│
-└── qick-dawg-patch/                            our modification to upstream qick-dawg
-    ├── lockinodmr.py                           full modified file
-    └── lockinodmr_offres_reference.patch       unified diff against upstream
+└── scripts/                                    standalone scripts
 ```
 
 ### How notebooks find the project root
@@ -110,9 +106,9 @@ pip install -e .
 
 If the RFSoC control environment needs a local editable `qick` checkout instead of the pinned wheel, clone/install only `qick` next to this project.
 
-### Step 3 — qick-dawg patch provenance
+### Step 3 — qick-dawg patch
 
-This project depends on a small modification to `qickdawg/nvpulsing/lockinodmr.py` that adds an `odmr_reference_offres_mhz` config flag. The reference shot fires the MW at an explicit off-resonance frequency (default 2650 MHz) instead of relying on gain control, which fixes a persistent leakage issue. The old patch files are retained in `qick-dawg-patch/` for provenance, but no manual patch step is required.
+This project depends on a small modification to `qickdawg/nvpulsing/lockinodmr.py` that adds an `odmr_reference_offres_mhz` config flag. The reference shot fires the MW at an explicit off-resonance frequency (default 2650 MHz) instead of relying on gain control, which fixes a persistent leakage issue. That patched source now lives directly in the vendored `qickdawg/` package, so there is no separate patch folder or manual patch step.
 
 ### Step 4 — register the venv with Jupyter
 
