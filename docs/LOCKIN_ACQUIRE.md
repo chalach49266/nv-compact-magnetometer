@@ -411,55 +411,103 @@ peaking jump at every batch boundary in continuous mode.
 3. Continuous laser pumping during the readout windows of body iterations
    re-polarizes between freq pairs without a dedicated repump pulse.
 
-### What the fix actually guarantees (be honest about scope)
+### Hardware assumption: laser is always on
+
+This setup runs with the **laser always on** — it is not switched by the
+PMOD output and stays at full power between, during, and across all FPGA
+program runs. That changes how `pre_init` and gap behavior should be
+interpreted, so this doc reflects that assumption everywhere below.
+
+With an always-on laser:
+
+- NV spins are continuously pumped toward |0⟩, so the **steady-state
+  polarization is preserved across batch gaps** — Python housekeeping
+  between `acquire()` calls (priming → setup → loop) does not depolarize
+  the ensemble.
+- **`pre_init=True` is actually counter-productive in this setup.** Its
+  three steps are an MW pulse, a laser-gate trigger, and a sync_all. The
+  laser trigger is a no-op (laser already on). The MW pulse fires at
+  `mw_start_fMHz = MULTIPOINT_FREQS_MHZ[0]`, which lies on the slope of an
+  ODMR transition, so it actively perturbs the spins toward |±1⟩ right
+  before the body loop begins. The first few body iterations then have to
+  re-polarize via in-readout laser pumping. That is the actual mechanism
+  behind the per-batch transient seen with `pre_init=True`, not
+  depolarization during gaps.
+
+### What the `pre_init=False` fix actually does in this setup
 
 What's structurally guaranteed by the code:
 
-- **Per-batch repolarization pulse is gone.** With `pre_init=False`, the ASM
-  for the polarization pulse is not in the compiled program. Every
-  `acquire()` enters the body loop after only `synci(100)` waits — no MW
-  pulse, no laser-gated repump, no sync_all delay. This eliminates the
-  *programmed* over-polarization transient that the old `pre_init=True`
-  pattern emitted at every batch boundary.
+- **The pre-body MW perturbation is gone.** With `pre_init=False`, the
+  polarization-pulse ASM is not in the compiled program. Every `acquire()`
+  enters the body loop after only `synci(100)` waits — no MW pulse, no
+  laser trigger, no sync_all delay. The spin state at the start of every
+  batch is whatever the always-on laser pumped it to, which is the |0⟩
+  steady state.
 - **No FPGA program rebuild between batches.** The same `prog_live` runs
   every iteration of the live loop, so there's no upload jitter and no
-  initialization beyond what's strictly needed.
+  re-initialization beyond what's strictly needed.
 
-What's *not* guaranteed by the code, and depends on hardware behavior:
+So in this setup the priming step (an acquire on a `pre_init=True`
+throwaway program) is *not* doing useful polarization work — the laser
+already does that. It's harmless, and it's still in the cell as
+defensive scaffolding in case the laser is ever gated again, but you
+could safely remove it. The fix that actually matters is `pre_init=False`
+on `prog_live`.
 
-- **The first batch after a long Python-side gap may still show a
-  transient.** Between the priming acquire and the live loop starting,
-  Python is doing housekeeping (deleting the priming program, building the
-  live program, setting up the live plot, printing). During that window
-  (~tens to hundreds of ms) the laser is OFF. NV spins partially relax
-  toward thermal equilibrium. The very first batch of the live loop fires
-  on partially-depolarized spins → contrast can be slightly elevated for
-  the first ~few reps until the in-body laser pumping rebuilds steady
-  state. With `reps = 10`, those few reps are most of the batch, so batch
-  zero may genuinely sit a bit higher than batches 1, 2, 3, … The signal
-  difference Δd that drives Δf still cancels common-mode offset, so this
-  shows up as a small Δf glitch at t = 0, not a lasting bias.
-- **Recurring per-batch peaks** (the old 8-peak cell's pathology) require
-  a polarization pulse to fire at every acquire. That pulse is gone. So
-  the *recurring* spike pattern is structurally impossible under the
-  current code. If you still see one, it isn't `pre_init` — likely
-  candidates: (a) a different cell rebuilt the program between batches,
-  (b) network jitter dropping pulse timing, (c) laser gating misconfigured
-  so the laser actually goes off between iterations.
+### What's *not* guaranteed by the code, and depends on hardware
 
-How to verify on real hardware:
+- **DAC / ADC startup transients on program restart.** Every `acquire()`
+  restarts the FPGA program; the first few clock cycles after restart can
+  show DAC settling artifacts or a missed/glitched ADC sample. This would
+  show up as a small offset on rep 0 of every batch's `d_buf`, averaged
+  in with the rest when the program returns averaged data. Whether this
+  is visible depends on the board's specific DAC/ADC behavior and is
+  outside what the Python code controls.
+- **Pyro4 RPC overhead variance.** Affects *when* batches land, not what
+  the FPGA measures. Watch `acq_seconds` in the saved CSV — if it's
+  bimodal (some 70 ms, some 300+ ms), that's the network, not the signal.
+- **Plot autoscale visual jumps.** The live plot calls `relim()` +
+  `autoscale_view()` on every redraw. When a new sample expands the y
+  range, the axis rescales and previous points appear to "jump" visually
+  even though the underlying numbers haven't changed. If you see jumps in
+  the live plot but the saved CSV looks flat, this is the cause. Workaround:
+  fix the y-limits manually after the first few batches, or post-process
+  from the CSV instead of trusting the live render.
+
+### Recurring per-batch peaks: structurally impossible under this code path
+
+The old 8-peak cell's pathology required a fresh program build (with its
+init pulse) at every batch boundary. The current cell builds `prog_live`
+once and reuses it for the whole live run, with `pre_init=False`. There's
+no per-batch ASM that emits a recurring spike. If you still observe a
+recurring sawtooth pattern in the saved CSV, the cause is *not* this
+module. Likely candidates:
+
+1. A *different* cell is rebuilding `prog_live` between batches (check
+   you didn't accidentally re-run `lockin_acquire` in the middle of a
+   live run — that would build a new program with the lockin_acquire's
+   `pre_init=True`).
+2. Network jitter dropping pulse timing — `acq_seconds` will reveal it.
+3. Plot autoscale (see above) — if it disappears when you plot from the
+   CSV, the live render was the culprit.
+
+### Verification recipe
 
 1. Run `lockin_live` with `LIVE_REPS_PER_BATCH = 10` and
    `LIVE_DURATION_SEC = 30`.
-2. Open the saved CSV (`data/lockin_multipoint/multipoint_lockin_live_*.csv`)
-   and plot `peak_01` (or any peak column) vs `batch`.
-3. Expected: batch 0 might be slightly higher than the rest (the gap
-   transient described above), but batches 1, 2, 3, … should sit on a flat
-   noise floor. **No recurring sawtooth.**
-4. If you see a recurring sawtooth, log `acq_seconds` per batch — if some
-   batches are ~150 ms and others are ~500 ms, that's network jitter, not
-   a polarization issue. The fix for that is `LIVE_PLOT_REFRESH_EVERY = 5`
-   or `10` to reduce per-batch plotting overhead.
+2. After it finishes, open the saved CSV
+   (`data/lockin_multipoint/multipoint_lockin_live_*.csv`) and plot
+   `peak_01` vs `batch` *outside* the live cell (so the live plot's
+   autoscale isn't deceiving you).
+3. Expected: a flat noise floor across all batches with no recurring
+   spikes. Batch 0 should also sit on the same level as the rest, since
+   the always-on laser keeps spins polarized through the priming → loop
+   transition.
+4. Plot `acq_seconds` vs `batch` to see network/Pyro4 jitter — for the
+   "is the loop running fast?" question, this is the ground truth.
+5. If `acq_seconds` is bimodal, set `LIVE_PLOT_REFRESH_EVERY = 5` or `10`
+   to reduce plotting overhead inside the loop.
 
 ### What the live cell saves
 
