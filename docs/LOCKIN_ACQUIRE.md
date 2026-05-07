@@ -2,6 +2,44 @@
 
 This doc explains how `Modules/Lockin_module.ipynb` and `Modules/multipoint_lockin_program.py` measure 16 parked frequencies in one FPGA program upload, and why that is roughly 5 s faster per shot than the naive per-frequency loop.
 
+## Guarantees enforced by the code (and how)
+
+Two pathologies came up before — the 01_basic 8-peak cell that took 5+ minutes per run, and per-batch peaking transients in continuous mode. The current cells make both **structurally impossible** via specific code-level guards:
+
+| Pathology | What used to cause it | Guard now in the code |
+| --- | --- | --- |
+| **5+ minute run time per batch** (01_basic 8-peak cell) | `qd.LockinODMR(cfg)` rebuilt 17× per batch — each rebuild is a 300–500 ms FPGA upload, plus the new `nsweep_points = 2` zero-span doubling of pulse work. | In `lockin_acquire` and `lockin_live`, the program is built **once** before any loop. The loop body only calls `prog.acquire()`, which triggers an already-uploaded program. **No instantiation of `MultipointLockinODMR` ever appears inside a loop.** |
+| **Recurring per-batch peaking** | `pre_init=True` fires an MW pulse at `mw_start_fMHz` (on the slope of an ODMR transition) at the start of every `acquire()`, perturbing spins toward the m\_s = ±1 manifold at every batch boundary; the in-body laser pumping then has to re-polarize. | `lockin_live` sets `cfg_live.pre_init = False` and asserts it explicitly before the program is built. The polarization-pulse ASM is removed from the compiled program — there is no per-batch perturbation to re-polarize from. |
+
+Concrete defensive lines now in the cells:
+
+```python
+# In lockin_live, just before the program is built:
+assert cfg_live.pre_init is False, (
+    "Live mode requires pre_init=False to prevent per-batch peaking. ..."
+)
+prog_live = MultipointLockinODMR(cfg_live)
+_predicted_ms_per_batch = prog_live.total_time() * 1e3
+print(f"Predicted ~{_predicted_ms_per_batch:.0f} ms/batch FPGA work")
+print(f"Watchdog: will warn if any batch exceeds ... ms (predicted × 3).")
+
+# Inside the live loop:
+acq_dt = t_end - t_start
+if acq_dt * 1000 > _predicted_ms_per_batch * LIVE_WATCHDOG_FACTOR:
+    print(f"⚠ batch {batch}: acq_seconds={acq_dt*1000:.0f} ms "
+          f"(predicted ~{_predicted_ms_per_batch:.0f} ms). "
+          f"Likely network jitter, not a code bug.")
+```
+
+This means:
+
+- If you ever accidentally edit the cell so that `pre_init=True` slips back in, the assertion catches it before any data is wasted.
+- If a batch takes more than 3× the predicted time, the watchdog prints a one-line warning so you don't have to wait for the run to finish to notice the slowdown. The first 5 spikes get printed; subsequent ones are aggregated into the end-of-run timing summary so the loop doesn't get spammed.
+- The end-of-run summary prints median, p95, and max per-batch times against the prediction, plus a count of how many batches tripped the watchdog. If "watchdog never fired," runtime is consistent with prediction.
+- `lockin_acquire` (single-shot) prints a similar sanity check on the first batch — if it took more than 5× the predicted time, you get a warning.
+
+So both issues now require *deliberate* code modification to reintroduce. They cannot creep back in via parameter tweaks or accidental cell-rerun ordering.
+
 ## The pipeline
 
 ```text
