@@ -13,19 +13,13 @@ nv_magnetometer_project/
 ├── requirements.txt                            pinned versions from working venv (qickdawg_venv, Python 3.13.5)
 ├── .gitignore
 │
-├── notebooks/                                  All Jupyter notebooks, grouped by experiment
+├── notebooks/                                  Jupyter notebooks, grouped by experiment
 │   ├── 01_basic_nv_testing/
 │   │   ├── 01_basic_nv_testing.ipynb           main workflow (ODMR + lock-in + multipoint)
 │   │   └── 01b_noise_cancelled_nv_testing.ipynb
-│   ├── 01_dual_channel_pl/
-│   │   ├── 01c_dual_channel_fast_pl_validation.ipynb
-│   │   └── 01e_dual_channel_fast_pl_outlier_aware_workflow.ipynb
-│   ├── 02_microwave_rabi/
-│   │   ├── 02_microwave_fixed_frequency.ipynb
-│   │   ├── 02_rabi_vector_magnetometry.ipynb
-│   │   └── 02b_noise_cancelled_rabi_vector_magnetometry.ipynb
-│   └── 03_analysis/
-│       └── Plot and sensitivity_csv.ipynb
+│   └── 01_dual_channel_pl/
+│       ├── 01c_dual_channel_fast_pl_validation.ipynb
+│       └── 01e_dual_channel_fast_pl_outlier_aware_workflow.ipynb
 │
 ├── Modules/                                    Reusable measurement modules (importable + interactive)
 │   ├── Lockin_module.ipynb                     plan → acquire (one FPGA upload) → reconstruct
@@ -127,12 +121,18 @@ When opening the notebooks, select the **"NV Magnetometer (qickdawg_venv)"** ker
 
 ## Typical workflow
 
-1. **ODMR sweep** — `notebooks/Modules/ODMR_module.ipynb` cell that runs `qd.LockinODMR` over 2600–3100 MHz writes `odmr_sweep_<timestamp>.csv` into `data/` and sets `LAST_ODMR_CSV`.
-2. **Plan parked frequencies** — `notebooks/Modules/Lockin_module.ipynb` cell `lockin_plan` calls `nv_toolkit.tui._suggest_parked_frequencies` on `LAST_ODMR_CSV` → 16 parked frequencies + bias estimate.
-3. **Acquire** — cell `lockin_acquire` builds **one** `MultipointLockinODMR` program for all 16 frequencies (one FPGA upload, ~same overhead as a single sweep) and writes a wide-format CSV.
-4. **Reconstruct B-field** — cell `lockin_reconstruct` calls `nv_toolkit.tui._compute_live_snapshot` and writes vector + projection CSVs.
+The end-to-end magnetometry pipeline runs in `Modules/Lockin_module.ipynb` (the reusable measurement module — `Modules/` lives at the project root, **not** under `notebooks/`):
 
-Steps 2 and 4 use the same algorithms exposed by the `mag-operator plan` / `mag-operator reconstruct` CLI commands in `nv_toolkit`. The notebook calls them directly so the workflow is end-to-end inside one Jupyter kernel.
+1. **ODMR sweep** — the ODMR cell in `Modules/Lockin_module.ipynb` runs `qd.LockinODMR` over 2600–3100 MHz, writes `odmr_sweep_<timestamp>.csv` into `data/odmr_sweeps/`, and sets `LAST_ODMR_CSV`.
+2. **Plan parked frequencies** — `lockin_plan` calls `nv_toolkit.tui._suggest_parked_frequencies` on `LAST_ODMR_CSV` → 16 parked frequencies + bias estimate.
+3. **Acquire** — `lockin_acquire` builds **one** `MultipointLockinODMR` program for all 16 frequencies (one FPGA upload, ~same overhead as a single sweep) and writes a wide-format CSV to `data/lockin_multipoint/`.
+4. **Δf per transition** — `lockin_to_peak_frequency` converts each batch's signal differences into a per-block `Δf` and inferred new peak frequency `f_new = f₀ + Δf` using the slope-based two-point lock-in calibration. See [`docs/LOCKIN_ACQUIRE.md`](docs/LOCKIN_ACQUIRE.md) for the math + literature.
+5. **Reconstruct B-field** — `lockin_reconstruct` calls `nv_toolkit.tui._compute_live_snapshot` and writes vector + projection CSVs.
+6. **(Optional) Live mode** — `lockin_live` runs continuous batches, streams per-block `Δf` to a timestamped CSV, and live-plots `Δf` vs time. Two post-processing cells follow it: `lockin_live_post_peak_frequency` (time-series Δf summary) and `lockin_live_post_reconstruct` (full B-field time series via `_compute_live_snapshot`).
+
+Steps 2 and 5 use the same algorithms exposed by the `mag-operator plan` / `mag-operator reconstruct` CLI commands in `nv_toolkit`. The notebook calls them directly so the workflow is end-to-end inside one Jupyter kernel.
+
+The supporting workflow notebooks under `notebooks/` (`01_basic_nv_testing/` and `01_dual_channel_pl/`) are for development and validation experiments that pre-date the Modules workflow; the canonical magnetometry pipeline is the one in `Modules/Lockin_module.ipynb`.
 
 ## Why the single-program multipoint matters
 
