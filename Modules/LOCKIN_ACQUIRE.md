@@ -309,6 +309,71 @@ per `(batch, block)` pair:
 - Zhang *et al.*, *Diam. Relat. Mater.* 2021 — slope-difference denominator
   with baseline-subtracted intensity differences.
 
+## Live (continuous) time-series mode
+
+The cells above run a single batch and stop. The `lockin_live` cell extends
+this into a continuous loop: keep calling `acquire()`, Δf-convert each batch
+on the fly, and stream both the wide-format peaks and the per-block Δf to a
+timestamped CSV under `data/lockin_multipoint/`.
+
+### The peaking-batching issue
+
+`MultipointLockinODMR.initialize()` includes an optional polarization
+pre-pulse:
+
+```python
+if self.cfg.pre_init:
+    self.pulse(ch=self.cfg.mw_channel)              # MW polarization pulse
+    self.trigger(pins=[laser_gate_pmod], ...)       # laser repump
+    self.sync_all(readout_integration + relax_delay)
+```
+
+Every `prog.acquire()` call restarts the FPGA program from the top, which
+means it re-runs `initialize()`. With `pre_init = True`, every batch begins
+with a fresh polarization pulse → the first few reps of each batch sit at an
+anomalously high PL because the spin state is over-polarized → a visible
+peaking jump at every batch boundary in continuous mode.
+
+### The fix the live cell applies
+
+1. **Prime once** with a one-shot acquire on a throwaway program built with
+   `pre_init=True`. The result is discarded; its only purpose is to drive the
+   NV ensemble into the polarized steady state before live data starts.
+2. **Run the live loop with `pre_init=False`** so each subsequent
+   `acquire()` jumps straight into the unrolled body without re-polarizing.
+   Continuous laser pumping during `relax_delay` keeps the spin state in
+   steady-state on its own once primed.
+
+That combination removes the per-batch transient. The first ~10 ms of the
+very first live batch may still drift slightly as the system fully settles,
+but there are no recurring spikes at later batch boundaries.
+
+### What the live cell saves
+
+`data/lockin_multipoint/multipoint_lockin_live_<YYYYMMDD_HHMMSS>.csv`, one
+row per batch, with the standard wide-format peak columns **plus** the
+per-block Δf and inferred new peak frequency:
+
+| column                    | meaning                                                            |
+| ------------------------- | ------------------------------------------------------------------ |
+| `batch`, `time_s`, `timestamp_epoch_s`, `acq_seconds` | per-batch metadata (time_s used by the toolkit) |
+| `peak_<NN>`, `peak_<NN>_ref`, `peak_<NN>_freq_mhz` | wide-format raw (toolkit-compatible) |
+| `delta_f_mhz_b<NN>`       | inferred frequency shift for block NN                              |
+| `f_new_mhz_b<NN>`         | inferred new peak frequency for block NN                           |
+
+The cell live-plots `delta_f_mhz_b<NN>` for every block over time, flushes
+the CSV every 5 s, and stops on either `LIVE_DURATION_SEC` elapsed or
+KeyboardInterrupt. After it stops it prints a per-block summary with
+`mean(Δf)`, `std(Δf)` and `std(ΔB_proj_uT) = std(Δf) / sensitivity` —
+the latter is a rough sensitivity-floor read for the run.
+
+### Why the fix doesn't apply to the single-batch cells
+
+`lockin_acquire` and `lockin_to_peak_frequency` only call `acquire()` once
+each. The single pre_init pulse at the start polarizes the spins into a
+clean state, and the result is what you actually want — there's no later
+batch to be "second" relative to. So those cells leave `pre_init=True`.
+
 ## Source files referenced
 
 - [`multipoint_lockin_program.py`](multipoint_lockin_program.py)
