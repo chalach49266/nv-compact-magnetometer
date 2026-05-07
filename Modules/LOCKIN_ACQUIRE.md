@@ -215,13 +215,113 @@ If you ever drop the off-resonance reference (set
 `cfg.odmr_reference_offres_mhz = None`) the body will still work but the
 reference column will be all zeros, since no reference pulse fires.
 
+## From signal difference to new peak frequency
+
+The acquire cell only gives raw PL at 16 parked frequencies. The notebook cell
+`lockin_to_peak_frequency` (inserted between `lockin_acquire` and
+`lockin_reconstruct`) converts those into a **per-transition frequency shift**
+$\Delta f_k$ and a **new peak frequency** $f_{\text{new},k} = f_{0,k} + \Delta f_k$
+using the standard slope-based two-point lock-in error signal.
+
+### The math
+
+For each ODMR transition $k$ (block index 1…8) at center $f_{0,k}$, with parked
+frequencies $f_{-,k}, f_{+,k}$, baselines $b_{-,k}, b_{+,k}$ (sampled from the
+reference ODMR), and slopes $m_{-,k}, m_{+,k}$ (from `np.gradient(spectrum, freqs)`):
+
+```text
+Δd_now    = S₊(t) − S₋(t)              # current intensity difference (this batch)
+Δd_ref    = b₊ − b₋                    # reference intensity difference (calibration)
+Δf_k      = (Δd_now − Δd_ref) / (m₋ − m₊)
+f_new,k   = f₀,k + Δf_k
+ΔB_proj,k = Δf_k / ‖df/dB‖_k
+```
+
+Because $m_-$ is negative (left flank of dip) and $m_+$ is positive, the
+denominator $m_- - m_+ \approx -2|m|$, and the formula reduces to the textbook
+$\Delta f \approx -\Delta d / (2|m|)$. Keeping the asymmetric form preserves
+accuracy when the slopes are not perfectly equal in magnitude (which is common
+when transitions overlap or sit on the wing of a neighbour).
+
+### Inputs reused from earlier cells
+
+The cell does not recompute anything from scratch. It pulls:
+
+- `freqs_mhz`, `measured`, `transition_centers` — produced by `lockin_plan` via
+  `nv_toolkit.tui._load_operator_full_scan` (the reference ODMR sweep).
+- `parked_plan`, `BIAS_MT` — also from `lockin_plan` (one
+  `ParkedFrequencyPlanEntry` per transition + the bias-field estimate).
+- `df_multipoint`, `MULTIPOINT_DATA_CSV` — from `lockin_acquire` (the wide
+  CSV with `peak_NN` / `peak_NN_ref`).
+
+### Existing toolkit functions used
+
+- `nv_toolkit.intensity_tracking.build_blockwise_calibrations(...)` — builds 8
+  `TwoPointCalibration` objects (slope, baseline, df/dB per transition) from the
+  reference ODMR.
+- `nv_toolkit.two_point.estimate_delta_f_mhz(s_minus, s_plus, calibration)` —
+  the one-line core formula.
+- `nv_toolkit.two_point.normalised_signal_from_counts(signal, reference)` —
+  converts raw ADC counts into the normalized intensity scale that the
+  calibration expects (matches how the reference spectrum is normalized).
+
+### Output
+
+`data/lockin_multipoint/multipoint_lockin_peak_inference.csv` (wide), one row
+per `(batch, block)` pair:
+
+| column                    | meaning                                                  |
+| ------------------------- | -------------------------------------------------------- |
+| `batch`, `block`          | batch index, block (transition) index 1..8               |
+| `f0_old_mhz`              | reference resonance frequency from the ODMR fit          |
+| `f_minus_mhz`, `f_plus_mhz` | the two parked frequencies                              |
+| `slope_minus_per_mhz`, `slope_plus_per_mhz` | calibration slopes (intensity / MHz) |
+| `baseline_minus`, `baseline_plus` | reference normalized intensities at the parked freqs |
+| `S_minus_norm`, `S_plus_norm` | current normalized intensities (signal/reference)    |
+| `current_diff`, `baseline_diff`, `delta_d` | Δd built up step by step           |
+| `delta_f_mhz`             | inferred frequency shift                                 |
+| `f_new_mhz`               | inferred new peak frequency                              |
+| `delta_B_proj_mT`, `delta_B_proj_uT` | projected B-field shift onto block's NV axis  |
+| `sensitivity_mhz_per_mT`  | ‖df/dB‖ for this transition at BIAS_MT                   |
+
+### Sanity checks the cell prints
+
+- For the first batch acquired right after `lockin_plan`, every $|\Delta f_k|$
+  should be $\lesssim 1$ MHz (within ADC noise + linewidth-relative drift) →
+  the calibration is consistent. A larger value means the parked-frequency
+  ADC read does not match the reference ODMR sweep — drift, gain change, or
+  sign error.
+- The slope-sign invariant `m_- < 0 < m_+` is checked for every block. A
+  violation usually means two ODMR transitions are degenerate at the current
+  bias field and the parked-plan algorithm picked overlapping windows; the
+  affected block's $\Delta f$ is unreliable until the bias field is adjusted
+  to lift the degeneracy.
+
+### Cited literature
+
+- El-Ella *et al.*, *Opt. Express* 2017 — lock-in slope is the calibration
+  anchor.
+- Clevenson *et al.*, *APL* 2018 — per-transition $\Delta f$ as the
+  closed-loop error signal.
+- Schloss *et al.*, *Phys. Rev. Applied* 2018 — multi-channel parked-frequency
+  vector reconstruction.
+- Hu *et al.*, *Micromachines* 2023 — multipoint DDS-based FSK lock-in.
+- Zhang *et al.*, *Diam. Relat. Mater.* 2021 — slope-difference denominator
+  with baseline-subtracted intensity differences.
+
 ## Source files referenced
 
 - [`multipoint_lockin_program.py`](multipoint_lockin_program.py)
   &nbsp;— `MultipointLockinODMR` class
 - [`Lockin_module.ipynb`](Lockin_module.ipynb)
-  &nbsp;— the three workflow cells (`lockin_plan`, `lockin_acquire`, `lockin_reconstruct`)
+  &nbsp;— the four workflow cells (`lockin_plan`, `lockin_acquire`,
+  `lockin_to_peak_frequency`, `lockin_reconstruct`)
 - `../qickdawg/nvpulsing/lockinodmr.py`
   &nbsp;— the patched upstream class with `odmr_reference_offres_mhz` support, used by ODMR sweeps
 - `../nv_toolkit/tui.py`
   &nbsp;— `_suggest_parked_frequencies` and `_compute_live_snapshot` helpers
+- `../nv_toolkit/two_point.py`
+  &nbsp;— `TwoPointCalibration`, `estimate_delta_f_mhz`,
+  `normalised_signal_from_counts`
+- `../nv_toolkit/intensity_tracking.py`
+  &nbsp;— `build_blockwise_calibrations`
