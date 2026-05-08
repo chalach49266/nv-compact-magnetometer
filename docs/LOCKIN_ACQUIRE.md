@@ -179,20 +179,55 @@ The off-resonance reference at 2650 MHz fires the MW far from every NV
 transition, so the reference shot has no NV excitation. This replaces the
 older approach of trying to cut MW gain to zero, which leaked at low gain.
 
-## Why off-resonance instead of MW-off
+## Reference shot: MW completely off + long relax_delay
 
-Older `LockinODMR` body code attempted to disable the MW for the reference
-shot by setting gain near zero. In practice the MW chain still leaked enough
-power to drive a partial dip in the reference trace, contaminating the
-contrast. Switching to an off-resonance frequency (2650 MHz, well below the
-~2.87 GHz zero-field splitting) keeps full MW power on the channel but
-prevents NV excitation, giving a clean baseline.
+The reference shot inside `MultipointLockinODMR.body()` is a **laser-only
+ADC read** — no MW pulse fires during the reference window. The freq
+register stays at the parked frequency from the signal shot; what gives a
+clean polarized baseline is the long `relax_delay_treg` between the
+signal pulse and the reference readout. During that gap the always-on
+laser fully repolarizes the NV ensemble to |0⟩, so when the ADC reads,
+it samples the polarized PL with no MW driving anything.
 
-This is implemented in `qickdawg/nvpulsing/lockinodmr.py` (the patched copy
-vendored in this repo) via the `cfg.odmr_reference_offres_mhz` flag, and
-`MultipointLockinODMR` uses the same flag — the reference shot inside its
-unrolled body simply calls `self.mw_frequency_register.set_to(2650.0)`
-before the reference pulse.
+```python
+# multipoint_lockin_program.py — the body() per parked frequency
+self.mw_frequency_register.set_to(float(freq_mhz))
+self.pulse(...)                                         # signal pulse
+self.trigger_no_off(adcs+laser, t=0)                    # signal ADC
+
+self.trigger_no_off(pins=[laser], width=relax_delay_treg, t=readout_int)  # repolarization gap
+
+self.trigger(adcs+laser, t=t_ref)                       # reference ADC — NO MW pulse
+self.wait_all(); self.sync_all(relax_delay_treg)
+```
+
+This replaces an earlier attempt that fired an off-resonance MW pulse
+(2650 MHz, well below the zero-field splitting) during the reference
+window. That worked in principle but the previous off-res pattern was
+sensitive to short `relax_delay` values: with a small gap the spins
+hadn't fully repolarized between signal and reference, and the apparent
+ODMR contrast collapsed to ~0.1 % even though the FPGA was switching
+frequencies correctly. The fix that actually worked empirically was
+**bumping `relax_delay_treg` to ~500 000** so the laser has enough time
+to repolarize. Once the delay is long, an off-res MW pulse during the
+reference window adds nothing — the spins are already in |0⟩ — so the
+simpler "no MW pulse for reference" form is preferred.
+
+Trade-off: the long relax_delay slows down each batch. For
+`MULTIPOINT_RELAX_DELAY_TREG = 500000`, `readout_integration_tus = 213`,
+16 parked frequencies, `reps = 10`:
+
+```text
+cycle per freq pair  = 2 × 213 µs + 2 × ~500 µs ≈ 1426 µs
+body() per rep       = 16 × 1426 µs            ≈ 23 ms
+total per batch      = 10 × 23 ms              ≈ 230 ms (~4 Hz)
+```
+
+Compared to the previous short-delay configuration (~70 ms per batch,
+~14 Hz) this is ~3× slower per batch but with full ODMR contrast at the
+parked frequencies. Drop `MULTIPOINT_RELAX_DELAY_TREG` if you're willing
+to trade contrast for speed (and benchmark on hardware to find the
+shortest delay that still gives a polarized reference on your rig).
 
 ## Concrete timing budget
 
