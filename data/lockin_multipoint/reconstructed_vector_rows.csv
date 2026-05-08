@@ -1,0 +1,2 @@
+save_id,timestamp_epoch_s,n_channels,rank,condition_number,residual_norm_uT,delta_Bx_uT,delta_By_uT,delta_Bz_uT,status
+000000,0.11657700012437999,8,3,14.85160306377845,510853.83968676877,262890.33332823945,-114428.36971755106,235885.8884426516,ok
