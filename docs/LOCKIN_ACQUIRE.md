@@ -1,6 +1,6 @@
 # Lock-in acquire — single-program multipoint implementation
 
-This doc explains how `Modules/Lockin_module.ipynb` and `Modules/multipoint_lockin_program.py` measure 16 parked frequencies in one FPGA program upload, and why that is roughly 5 s faster per shot than the naive per-frequency loop.
+This doc explains how `Modules/Lockin_module.ipynb` and `notebook_modules/multipoint_lockin_program.py` measure 16 parked frequencies in one FPGA program upload, and why that is roughly 5 s faster per shot than the naive per-frequency loop.
 
 ## Guarantees enforced by the code (and how)
 

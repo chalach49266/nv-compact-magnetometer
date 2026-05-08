@@ -37,8 +37,14 @@ dev = [
 ]
 
 [tool.setuptools]
+# Notebook helper .py files live in notebook_modules/ — point setuptools at
+# that directory so `pip install -e .` exposes them as top-level imports
+# (matches the from-import patterns the notebooks use after the
+# project_root_setup cell adds notebook_modules/ to sys.path).
+package-dir = {"" = "notebook_modules"}
 py-modules = [
     "lockin_extensions",
+    "multipoint_lockin_program",
     "nv_magnetometry_analysis",
     "odmr_sensitivity",
     "twopoint_lockin",

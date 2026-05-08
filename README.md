@@ -21,16 +21,17 @@ nv_magnetometer_project/
 │       ├── 01c_dual_channel_fast_pl_validation.ipynb
 │       └── 01e_dual_channel_fast_pl_outlier_aware_workflow.ipynb
 │
-├── Modules/                                    Reusable measurement modules (importable + interactive)
+├── Modules/                                    Reusable measurement notebooks (interactive)
 │   ├── Lockin_module.ipynb                     plan → acquire (one FPGA upload) → reconstruct
 │   ├── ODMR_module.ipynb
-│   ├── PL_readout_module.ipynb
-│   └── multipoint_lockin_program.py            MultipointLockinODMR (one-program N-frequency lock-in)
+│   └── PL_readout_module.ipynb
 │
-├── twopoint_lockin.py                          run_twopoint_lockin / single_shot_twopoint
-├── odmr_sensitivity.py                         ODMR Lorentzian fits, sensitivity estimates
-├── lockin_extensions.py                        sinusoidal FM, feedback, slope analysis
-├── nv_magnetometry_analysis.py                 standalone analysis script
+├── notebook_modules/                           Python helper modules used by the notebooks
+│   ├── twopoint_lockin.py                      run_twopoint_lockin / single_shot_twopoint
+│   ├── odmr_sensitivity.py                     ODMR Lorentzian fits, sensitivity estimates
+│   ├── lockin_extensions.py                    sinusoidal FM, feedback, slope analysis
+│   ├── multipoint_lockin_program.py            MultipointLockinODMR (one-program N-frequency lock-in)
+│   └── nv_magnetometry_analysis.py             standalone analysis script
 ├── nv_toolkit/                                  vendored B-field fitting + parked-frequency inversion helpers
 ├── qickdawg/                                    vendored patched qick-dawg Python package used by notebooks
 ├── phase1/                                      notebook helper module for 8-peak parked-frequency planning
