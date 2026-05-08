@@ -9,17 +9,10 @@ it with one LockinODMR per frequency triggers 16 FPGA program uploads
 This class works around that by writing all 16 frequencies into one program's
 body() method. Each body iteration uses `mw_frequency_register.set_to(f_mhz)`
 to switch the MW frequency at runtime, then pulses + reads the ADC. The
-reference shot is taken with MW completely off, after a long `relax_delay`
-during which the always-on laser fully repolarizes the NV ensemble to |0⟩.
+reference shot fires MW at an off-resonance frequency (default 2650 MHz).
 
 Result: ONE FPGA program upload, then `reps` averaged measurements at all
 N frequencies in tight hardware sequence — same speed as a single ODMR sweep.
-
-Important: `relax_delay_treg` must be long enough for laser pumping to
-fully repolarize the spins between the signal and reference shots
-(empirically ~500 000 register units on this rig). With a too-short
-relax_delay the reference captures the post-perturbation state instead
-of the polarized baseline, which collapses the apparent ODMR contrast.
 """
 
 from __future__ import annotations
@@ -37,14 +30,11 @@ class MultipointLockinODMR(NVAveragerProgram):
         multipoint_freqs_mhz : sequence of float
             The N MW frequencies (MHz) to park at. One signal+reference
             readout pair per frequency, per rep.
-        relax_delay_treg : int
-            Delay between signal and reference shots in register units.
-            Must be long enough for the always-on laser to fully repolarize
-            the NV ensemble (~500 000 treg works on this rig). The reference
-            shot is taken with MW completely off, so this delay is what
-            actually establishes the polarized baseline.
+        odmr_reference_offres_mhz : float
+            Off-resonance frequency (MHz) for the reference shot.
         Other LockinODMR cfg attributes (mw_channel, adc_channel, mw_gain,
-        readout_integration_treg, laser_gate_pmod, mw_nqz, pre_init, reps).
+        readout_integration_treg, relax_delay_treg, laser_gate_pmod,
+        mw_nqz, pre_init, reps).
     """
 
     required_cfg = [
@@ -58,6 +48,7 @@ class MultipointLockinODMR(NVAveragerProgram):
         "pre_init",
         "reps",
         "multipoint_freqs_mhz",
+        "odmr_reference_offres_mhz",
     ]
 
     def initialize(self):
@@ -99,20 +90,14 @@ class MultipointLockinODMR(NVAveragerProgram):
     def body(self):
         """Generate ASM that loops through all N frequencies in one body call.
 
-        Each frequency contributes one signal+reference readout pair where
-        the reference is taken with MW completely OFF (no off-resonance
-        pulse). The relax_delay between signal and reference must be long
-        enough for the always-on laser to fully repolarize the NV ensemble
-        — typically ~500 000 treg units on this rig. With a too-short
-        delay, the reference captures the post-perturbation spin state
-        instead of the polarized baseline and ODMR contrast collapses.
-
+        Each frequency contributes one signal+reference readout pair.
         Total readouts per body = 2 * N.
         """
+        ref_offres_mhz = float(self.cfg.odmr_reference_offres_mhz)
         freqs_mhz = list(self.cfg.multipoint_freqs_mhz)
 
         for freq_mhz in freqs_mhz:
-            # Signal: MW at this parked frequency.
+            # Set MW to this parked frequency (signal pulse).
             self.mw_frequency_register.set_to(float(freq_mhz))
             self.pulse(ch=self.cfg.mw_channel, t=0)
 
@@ -123,9 +108,6 @@ class MultipointLockinODMR(NVAveragerProgram):
                 adc_trig_offset=0,
                 t=0,
             )
-            # Long relax_delay with laser only (no MW). The always-on laser
-            # repolarizes the NV ensemble to |0⟩ during this window so the
-            # reference shot below sees the polarized baseline.
             self.trigger_no_off(
                 pins=[self.cfg.laser_gate_pmod],
                 width=self.cfg.relax_delay_treg,
@@ -135,9 +117,9 @@ class MultipointLockinODMR(NVAveragerProgram):
 
             t_ref = self.cfg.readout_integration_treg + self.cfg.relax_delay_treg
 
-            # Reference: laser-only ADC readout, no MW pulse. With long
-            # relax_delay the spins are now polarized in |0⟩, so this is
-            # equivalent to a true MW-off baseline measurement.
+            # Set MW to off-resonance (reference pulse — no NV excitation).
+            self.mw_frequency_register.set_to(ref_offres_mhz)
+            self.pulse(ch=self.cfg.mw_channel, t=t_ref)
             self.trigger(
                 adcs=self.cfg.adcs,
                 pins=[self.cfg.laser_gate_pmod],
