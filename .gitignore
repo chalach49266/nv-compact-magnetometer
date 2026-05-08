@@ -37,6 +37,16 @@ Thumbs.db
 docs/_build/
 *.bit
 
+# LaTeX intermediates (keep .tex source + .pdf output, drop the rest)
+*.aux
+*.nav
+*.out
+*.snm
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
 # Temporary
 tmp/
 *.tmp
