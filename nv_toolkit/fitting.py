@@ -42,6 +42,7 @@ def fit_field_from_peak_positions(
     *,
     nv_axes_preset: str = "canonical",
     nv_axes: np.ndarray | None = None,
+    pred_axis_centers: np.ndarray | None = None,
 ) -> dict[str, object]:
     """Fast analytical field estimate from exactly 8 transition-center frequencies.
 
@@ -74,9 +75,10 @@ def fit_field_from_peak_positions(
     pairs = [(float(centers[i]), float(centers[7 - i])) for i in range(4)]
     obs_pair_centers = np.array([0.5 * (p[0] + p[1]) for p in pairs])
 
-    res_by_axis = odmr_resonances(b_base, nv_axes=nv_axes)  # (4, 2)
-    pred_axis_centers = 0.5 * (res_by_axis[:, 0] + res_by_axis[:, 1])  # (4,)
-    cost_matrix = np.abs(obs_pair_centers[:, None] - pred_axis_centers[None, :])
+    if pred_axis_centers is None:
+        res_by_axis = odmr_resonances(b_base, nv_axes=nv_axes)  # (4, 2)
+        pred_axis_centers = 0.5 * (res_by_axis[:, 0] + res_by_axis[:, 1])  # (4,)
+    cost_matrix = np.abs(obs_pair_centers[:, None] - np.asarray(pred_axis_centers, dtype=float)[None, :])
     obs_order, axis_order = linear_sum_assignment(cost_matrix)
 
     A = np.zeros((4, 3), dtype=float)
@@ -350,6 +352,8 @@ def fit_local_field(
         regularization = float(local_field_l2_penalty) * float(np.dot(b_local, b_local))
         return float(np.sum((predicted - measured) ** 2) + regularization)
 
+    _EARLY_EXIT_THRESHOLD = 1e-4
+
     raw_initial = np.asarray(diagnostics["B_local_mT"], dtype=float)
     bound = abs(float(local_field_bounds_mT))
     starts = [
@@ -369,6 +373,8 @@ def fit_local_field(
     best_success = bool(diagnostics["success"])
     best_nfev = int(diagnostics["nfev"])
     for start in starts:
+        if float(best_cost) < _EARLY_EXIT_THRESHOLD and bool(best_success):
+            break
         result = minimize(
             lambda x: _local_cost(np.asarray(x, dtype=float)),
             np.clip(np.asarray(start, dtype=float), -bound, bound),
@@ -393,6 +399,8 @@ def fit_local_field(
         for gx in grid_vals:
             for gy in grid_vals:
                 for gz in grid_vals:
+                    if float(best_cost) < _EARLY_EXIT_THRESHOLD and bool(best_success):
+                        break
                     grid_start = np.array([gx, gy, gz], dtype=float)
                     result = minimize(
                         lambda x: _local_cost(np.asarray(x, dtype=float)),

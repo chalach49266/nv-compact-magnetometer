@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.optimize import minimize
+from scipy.optimize import curve_fit
 from scipy.signal import find_peaks, peak_widths, savgol_filter
 
 
@@ -419,6 +419,37 @@ def collapse_candidate_clusters(
     return centers, cluster_rows
 
 
+def _estimate_local_fwhm_mhz(
+    local_freqs: np.ndarray,
+    local_values: np.ndarray,
+    window_mhz: float = 8.0,
+) -> float:
+    """Estimate FWHM of the dominant dip in a local spectral segment.
+
+    Uses scipy.signal.peak_widths on the inverted trace.  Falls back to
+    ``min(window_mhz / 4, 3.0)`` when the estimate would be degenerate.
+    """
+    if len(local_freqs) < 5:
+        return min(window_mhz / 4.0, 3.0)
+    spacing_mhz = float(np.median(np.diff(local_freqs)))
+    if spacing_mhz <= 0.0:
+        return min(window_mhz / 4.0, 3.0)
+    inverted = -np.asarray(local_values, dtype=float)
+    inverted -= inverted.min()
+    if inverted.max() == 0.0:
+        return min(window_mhz / 4.0, 3.0)
+    inverted /= inverted.max()
+    peak_idx = int(np.argmax(inverted))
+    try:
+        widths_samples, _, _, _ = peak_widths(inverted, [peak_idx], rel_height=0.5)
+        fwhm_mhz = float(widths_samples[0]) * spacing_mhz
+    except Exception:
+        return min(window_mhz / 4.0, 3.0)
+    if fwhm_mhz < 0.2 or fwhm_mhz >= window_mhz * 2.0:
+        return min(window_mhz / 4.0, 3.0)
+    return fwhm_mhz
+
+
 def fit_local_dips(
     freqs_mhz: np.ndarray,
     spectrum: np.ndarray,
@@ -426,12 +457,18 @@ def fit_local_dips(
     *,
     window_mhz: float = 8.0,
     model: str = "lorentzian",
+    hyperfine_merge_mhz: float = 3.0,
 ) -> list[DipFitResult]:
     """Fit local dip profile parameters around supplied center guesses.
 
     Supported models are ``lorentzian``, ``gaussian``, and ``pseudo_voigt``.
     ``linewidth_mhz`` is FWHM for all three models.  For ``pseudo_voigt``,
     ``eta`` is the Lorentzian mixing fraction.
+
+    Candidates separated by less than ``hyperfine_merge_mhz`` are collapsed
+    into a single midpoint before fitting — they are almost certainly hyperfine
+    lines of the same NV transition (~2.16 MHz splitting) rather than distinct
+    transitions.  Set to 0 to disable.
     """
     model_name = str(model).strip().lower().replace("-", "_")
     if model_name not in {"lorentzian", "gaussian", "pseudo_voigt"}:
@@ -439,58 +476,101 @@ def fit_local_dips(
 
     freqs = np.asarray(freqs_mhz, dtype=float)
     values = np.asarray(spectrum, dtype=float)
-    centers = np.asarray(dip_centers_mhz, dtype=float)
+    raw_centers = np.sort(np.asarray(dip_centers_mhz, dtype=float))
+
+    # Collapse pairs within hyperfine_merge_mhz into a single midpoint.
+    merged: list[float] = []
+    skip_next = False
+    for i, c in enumerate(raw_centers):
+        if skip_next:
+            skip_next = False
+            continue
+        if i + 1 < len(raw_centers) and (raw_centers[i + 1] - c) < float(hyperfine_merge_mhz):
+            merged.append(float(0.5 * (c + raw_centers[i + 1])))
+            skip_next = True
+        else:
+            merged.append(float(c))
+    centers = np.asarray(merged, dtype=float)
     if freqs.shape != values.shape:
         raise ValueError(f"freqs shape {freqs.shape} does not match spectrum shape {values.shape}")
 
+    # Per-center windows: shrink when a neighbour is closer than the default
+    # window to avoid contaminating fits with the adjacent peak's data.
+    if len(centers) > 1:
+        center_windows = []
+        for i, c in enumerate(centers):
+            gaps = [abs(c - centers[j]) for j in range(len(centers)) if j != i]
+            min_gap = min(gaps)
+            center_windows.append(min(float(window_mhz), 0.9 * min_gap / 2.0))
+    else:
+        center_windows = [float(window_mhz)]
+
     fits: list[DipFitResult] = []
-    for center_guess in centers:
-        mask = np.abs(freqs - float(center_guess)) <= float(window_mhz)
+    for center_guess, win in zip(centers, center_windows):
+        mask = np.abs(freqs - float(center_guess)) <= win
         local_freqs = freqs[mask]
         local_values = values[mask]
         if len(local_freqs) < 5:
             continue
 
         baseline0 = float(np.percentile(local_values, 90.0))
-        min_idx = int(np.argmin(local_values))
-        center0 = float(local_freqs[min_idx])
-        contrast0 = max(float(baseline0 - local_values[min_idx]), 1e-5)
-        linewidth0 = min(max(float(window_mhz) / 2.0, 0.1), 20.0)
+        nearest_idx = int(np.argmin(np.abs(local_freqs - float(center_guess))))
+        center0 = float(center_guess)
+        contrast0 = max(float(baseline0 - local_values[nearest_idx]), 1e-5)
+        linewidth0 = _estimate_local_fwhm_mhz(local_freqs, local_values, win)
 
-        def model(params: np.ndarray) -> np.ndarray:
-            center, linewidth, contrast, baseline = np.asarray(params[:4], dtype=float)
-            half_width = linewidth / 2.0
-            lorentz = half_width**2 / ((local_freqs - center) ** 2 + half_width**2)
-            gaussian = np.exp(-4.0 * np.log(2.0) * ((local_freqs - center) / linewidth) ** 2)
-            if model_name == "lorentzian":
-                shape = lorentz
-            elif model_name == "gaussian":
-                shape = gaussian
-            else:
-                eta = float(params[4])
-                shape = eta * lorentz + (1.0 - eta) * gaussian
-            return baseline - contrast * shape
-
-        def cost(params: np.ndarray) -> float:
-            predicted = model(params)
-            return float(np.sum((predicted - local_values) ** 2))
-
+        lower = [center_guess - win, 0.2, 0.0, float(np.min(local_values) - 0.05)]
+        upper = [center_guess + win, 29.0, 0.2, float(np.max(local_values) + 0.05)]
         x0 = [center0, linewidth0, contrast0, baseline0]
-        lower = [center_guess - window_mhz, 0.1, 0.0, float(np.min(local_values) - 0.05)]
-        upper = [center_guess + window_mhz, 30.0, 0.2, float(np.max(local_values) + 0.05)]
         if model_name == "pseudo_voigt":
             x0.append(0.5)
             lower.append(0.0)
             upper.append(1.0)
-        result = minimize(
-            cost,
-            np.asarray(x0, dtype=float),
-            method="L-BFGS-B",
-            bounds=list(zip(lower, upper)),
-            options={"ftol": 1e-14, "maxiter": 20000},
-        )
-        center, linewidth, contrast, baseline = np.asarray(result.x[:4], dtype=float)
-        eta = float(result.x[4]) if model_name == "pseudo_voigt" else None
+
+        if model_name == "lorentzian":
+            def _curve_func(f: np.ndarray, center: float, linewidth: float, contrast: float, baseline: float) -> np.ndarray:
+                hw = linewidth / 2.0
+                return baseline - contrast * hw**2 / ((f - center) ** 2 + hw**2)
+        elif model_name == "gaussian":
+            def _curve_func(f: np.ndarray, center: float, linewidth: float, contrast: float, baseline: float) -> np.ndarray:
+                return baseline - contrast * np.exp(-4.0 * np.log(2.0) * ((f - center) / linewidth) ** 2)
+        else:
+            def _curve_func(f: np.ndarray, center: float, linewidth: float, contrast: float, baseline: float, eta: float) -> np.ndarray:
+                hw = linewidth / 2.0
+                lorentz = hw**2 / ((f - center) ** 2 + hw**2)
+                gaussian = np.exp(-4.0 * np.log(2.0) * ((f - center) / linewidth) ** 2)
+                return baseline - contrast * (eta * lorentz + (1.0 - eta) * gaussian)
+
+        success = False
+        cost_val = float("inf")
+        center = center0
+        linewidth = linewidth0
+        contrast = contrast0
+        baseline = baseline0
+        eta: float | None = None
+        try:
+            popt, _ = curve_fit(
+                _curve_func,
+                local_freqs,
+                local_values,
+                p0=x0,
+                bounds=(lower, upper),
+                method="trf",
+                maxfev=50000,
+            )
+            center, linewidth, contrast, baseline = float(popt[0]), float(popt[1]), float(popt[2]), float(popt[3])
+            eta = float(popt[4]) if model_name == "pseudo_voigt" else None
+            residuals = local_values - _curve_func(local_freqs, *popt)
+            cost_val = float(np.sum(residuals**2))
+            rms = float(np.sqrt(np.mean(residuals**2)))
+            peak_to_peak = float(np.max(local_values) - np.min(local_values))
+            center_ok = abs(center - float(center_guess)) <= win
+            width_ok = linewidth > 0.2 and linewidth < 29.0
+            residual_ok = peak_to_peak == 0.0 or rms <= 0.5 * peak_to_peak
+            success = center_ok and width_ok and residual_ok
+        except Exception:
+            pass
+
         fits.append(
             DipFitResult(
                 center_mhz=float(center),
@@ -499,8 +579,8 @@ def fit_local_dips(
                 baseline=float(baseline),
                 model=model_name,
                 eta=eta,
-                cost=float(result.fun),
-                success=bool(result.success),
+                cost=cost_val,
+                success=success,
                 n_points=int(len(local_freqs)),
             )
         )
@@ -522,6 +602,59 @@ def fit_lorentzian_dips(
         window_mhz=window_mhz,
         model="lorentzian",
     )
+
+
+def reject_unpaired_peaks(
+    fits: list[DipFitResult],
+    sweep_range_mhz: tuple[float, float],
+    *,
+    d0_mhz: float | None = None,
+    pair_tolerance_mhz: float = 20.0,
+) -> tuple[list[DipFitResult], list[DipFitResult]]:
+    """Separate fitted peaks into physically paired (kept) and spurious (rejected).
+
+    Two rejection criteria applied in order:
+
+    1. **Mirror outside sweep range**: if 2*D0 - center falls outside the measured
+       frequency window, the peak cannot have a visible partner → rejected.
+    2. **No close partner**: if the mirror is in range but no detected peak lies
+       within pair_tolerance_mhz, the peak is rejected.
+
+    D0 is estimated from the inner pairs (excluding the outermost pair) to avoid
+    bias from per-axis strain shifts (typically ±3–6 MHz in real samples).
+    If fewer than 4 peaks are present, falls back to 2870.0 MHz.
+
+    Returns (kept, rejected).
+    """
+    if len(fits) == 0:
+        return [], []
+
+    sorted_fits = sorted(fits, key=lambda f: f.center_mhz)
+    cs = np.array([f.center_mhz for f in sorted_fits])
+    n = len(cs)
+    f_lo, f_hi = float(sweep_range_mhz[0]), float(sweep_range_mhz[1])
+
+    if d0_mhz is None:
+        # Estimate D0 from inner pairs only (skip outermost pair on each side)
+        inner_midpoints = [
+            0.5 * (cs[i] + cs[n - 1 - i])
+            for i in range(1, n // 2)  # skip i=0 (outermost)
+        ]
+        d0_mhz = float(np.mean(inner_midpoints)) if inner_midpoints else 2870.0
+
+    kept: list[DipFitResult] = []
+    rejected: list[DipFitResult] = []
+
+    for fit in sorted_fits:
+        mirror = 2.0 * d0_mhz - fit.center_mhz
+        if not (f_lo <= mirror <= f_hi):
+            rejected.append(fit)
+        elif float(np.min(np.abs(cs - mirror))) > pair_tolerance_mhz:
+            rejected.append(fit)
+        else:
+            kept.append(fit)
+
+    return kept, rejected
 
 
 def collapse_hyperfine_doublets(

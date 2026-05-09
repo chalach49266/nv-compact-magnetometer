@@ -43,16 +43,26 @@ class TwoPointCalibration:
     slope_plus_per_mhz: float
     df_dB_vector_mhz_per_mT: np.ndarray
 
+    def __post_init__(self) -> None:
+        # Precompute constants that would otherwise be recomputed on every sample call.
+        norm = float(np.linalg.norm(self.df_dB_vector_mhz_per_mT))
+        object.__setattr__(self, "_sensitivity_norm", norm)
+        if norm == 0.0:
+            object.__setattr__(self, "_measurement_axis", np.zeros(3, dtype=float))
+        else:
+            object.__setattr__(self, "_measurement_axis", self.df_dB_vector_mhz_per_mT / norm)
+        object.__setattr__(self, "_d_reference", self.baseline_plus - self.baseline_minus)
+        object.__setattr__(self, "_denom", self.slope_minus_per_mhz - self.slope_plus_per_mhz)
+
     @property
     def sensitivity_norm_mhz_per_mT(self) -> float:
-        return float(np.linalg.norm(self.df_dB_vector_mhz_per_mT))
+        return self._sensitivity_norm  # type: ignore[attr-defined]
 
     @property
     def measurement_axis(self) -> np.ndarray:
-        norm = self.sensitivity_norm_mhz_per_mT
-        if norm == 0.0:
+        if self._sensitivity_norm == 0.0:  # type: ignore[attr-defined]
             raise ValueError("Tracked transition has zero magnetic sensitivity at this bias point")
-        return self.df_dB_vector_mhz_per_mT / norm
+        return self._measurement_axis  # type: ignore[attr-defined]
 
 
 def build_two_point_calibration(
@@ -117,9 +127,8 @@ def estimate_delta_f_mhz(
     calibration: TwoPointCalibration,
 ) -> float:
     d_current = float(signal_plus) - float(signal_minus)
-    d_reference = calibration.baseline_plus - calibration.baseline_minus
-    delta_d = d_current - d_reference
-    denom = calibration.slope_minus_per_mhz - calibration.slope_plus_per_mhz
+    delta_d = d_current - calibration._d_reference  # type: ignore[attr-defined]
+    denom = calibration._denom  # type: ignore[attr-defined]
     if abs(denom) < 1e-12:
         raise ValueError("Calibration slopes are too small for a stable delta_f estimate")
     return float(delta_d / denom)
@@ -147,27 +156,121 @@ def estimate_delta_B_projection_mT(
     target = np.array([float(signal_minus), float(signal_plus)], dtype=float)
     axis = calibration.measurement_axis
     freqs = np.array([calibration.f_minus_mhz, calibration.f_plus_mhz], dtype=float)
+    lo = delta_B_linear_mT - float(search_radius_mT)
+    hi = delta_B_linear_mT + float(search_radius_mT)
 
-    def _cost(delta_proj_mT: float) -> float:
-        predicted = odmr_spectrum(
-            freqs,
-            calibration.B_bias_mT + float(delta_proj_mT) * axis,
-            linewidths=linewidths,
-            contrasts=contrasts,
-            hyperfine_splitting_mhz=hyperfine_splitting_mhz,
-            nv_axes=nv_axes,
-        )
-        return float(np.sum((predicted - target) ** 2))
+    # Expand linewidth/contrast to shape (4,2) once; resonances always has shape (4,2).
+    _res_shape = (4, 2)
+    lw_arr = np.atleast_1d(np.asarray(linewidths, dtype=float))
+    ct_arr = np.atleast_1d(np.asarray(contrasts, dtype=float))
+    if lw_arr.shape == (4,):
+        lw2d_pre = np.repeat(lw_arr, 2).reshape(4, 2)
+    else:
+        lw2d_pre = np.broadcast_to(lw_arr, _res_shape).copy()
+    if ct_arr.shape == (4,):
+        ct2d_pre = np.repeat(ct_arr, 2).reshape(4, 2)
+    else:
+        ct2d_pre = np.broadcast_to(ct_arr, _res_shape).copy()
 
-    result = minimize_scalar(
-        _cost,
-        bounds=(delta_B_linear_mT - float(search_radius_mT), delta_B_linear_mT + float(search_radius_mT)),
-        method="bounded",
-        options={"xatol": 1e-8},
-    )
-    if not result.success:
-        return delta_B_linear_mT
-    return float(result.x)
+    def _predicted_and_derivative(delta_proj_mT: float) -> tuple[np.ndarray, np.ndarray]:
+        """Return (pred[2], dpred_ddelta[2]) using one resonances+gradients call.
+
+        Gauss-Newton needs J = dpred/ddelta analytically.  Each Lorentzian dip at
+        center contributes  -c·hw²/((f-center)²+hw²), whose derivative w.r.t. center
+        is  +2c·hw²·(f-center)/((f-center)²+hw²)².  Chain through dcenter/ddelta
+        = (grads @ axis)[j,k] to get dpred_k/ddelta summed over all resonances.
+        Fully vectorized over all 8 resonances to avoid Python-level loops.
+        """
+        B_total = calibration.B_bias_mT + float(delta_proj_mT) * axis
+        resonances, grads = odmr_resonances_and_gradients(B_total, nv_axes=nv_axes)
+        # dres_ddelta[j,k] = d(center_jk)/d(delta), shape (4,2) → flatten to (8,)
+        dres_ddelta_flat = (grads @ axis).ravel()   # (8,)
+        centers_flat = resonances.ravel()            # (8,)
+
+        # hw2d and ct2d: shape (8,) after broadcast+flatten
+        hw_flat = (lw2d_pre / 2.0).ravel()          # (8,)
+        ct_flat = ct2d_pre.ravel()                   # (8,)
+
+        if hyperfine_splitting_mhz is None:
+            # centers shape (8,1), freqs shape (1,2): detuning u = f_k - ctr_j, shape (8,2)
+            d_all = freqs[None, :] - centers_flat[:, None]         # (8, 2)
+            denom_all = d_all ** 2 + hw_flat[:, None] ** 2        # (8, 2)
+            lor_all = hw_flat[:, None] ** 2 / denom_all            # (8, 2)
+            # pred = 1 - sum_over_8(c * lor)  (2,)
+            pred = np.ones(2, dtype=float) - (ct_flat[:, None] * lor_all).sum(axis=0)
+            # dpred/dctr = -c * 2*u*hw²/denom²; chain: dpred/ddelta = dpred/dctr * dctr/ddelta
+            dpred = -(ct_flat[:, None] * 2.0 * hw_flat[:, None] ** 2
+                      * d_all / (denom_all ** 2)
+                      * dres_ddelta_flat[:, None]).sum(axis=0)
+        else:
+            half_split = 0.5 * float(hyperfine_splitting_mhz)
+            # Two sub-peaks per resonance: centers ± half_split, contrast halved.
+            # Both sub-peaks translate together with the resonance center, so dc_sub/ddelta = dres_ddelta.
+            ctr_lo = centers_flat - half_split    # (8,)
+            ctr_hi = centers_flat + half_split    # (8,)
+            ct_hf = ct_flat * 0.5                 # (8,)
+            pred = np.ones(2, dtype=float)
+            dpred = np.zeros(2, dtype=float)
+            for ctr_sub in (ctr_lo, ctr_hi):
+                d_all = freqs[None, :] - ctr_sub[:, None]             # (8, 2)
+                denom_all = d_all ** 2 + hw_flat[:, None] ** 2        # (8, 2)
+                pred -= (ct_hf[:, None] * hw_flat[:, None] ** 2 / denom_all).sum(axis=0)
+                dpred -= (ct_hf[:, None] * 2.0 * hw_flat[:, None] ** 2
+                          * d_all / (denom_all ** 2)
+                          * dres_ddelta_flat[:, None]).sum(axis=0)
+
+        pred = np.clip(pred, 0.0, 1.0)
+        return pred, dpred
+
+    # Gauss-Newton from linear seed: δ ← δ − (J·r)/(J·J)
+    # Typically converges in 1–2 steps; cap at 5.
+    delta = delta_B_linear_mT
+    cost_seed = None
+    converged = False
+    tol = 1e-10
+    tiny = 1e-30
+    for _ in range(5):
+        delta_clamped = float(np.clip(delta, lo, hi))
+        pred, J = _predicted_and_derivative(delta_clamped)
+        residuals = pred - target       # (2,)
+        Jr = float(np.dot(J, residuals))
+        JJ = float(np.dot(J, J))
+        if cost_seed is None:
+            cost_seed = float(np.sum(residuals ** 2))
+        if abs(Jr) < 1e-12:
+            converged = True
+            delta = delta_clamped
+            break
+        step = -Jr / max(JJ, tiny)
+        delta_new = float(np.clip(delta_clamped + step, lo, hi))
+        if abs(delta_new - delta_clamped) < tol:
+            converged = True
+            delta = delta_new
+            break
+        delta = delta_new
+
+    delta_final = float(np.clip(delta, lo, hi))
+
+    # Only fall back to minimize_scalar when Newton failed (didn't converge or cost rose).
+    if not converged:
+        pred_final, _ = _predicted_and_derivative(delta_final)
+        cost_final = float(np.sum((pred_final - target) ** 2))
+        if cost_seed is None or cost_final > cost_seed:
+            def _cost(d: float) -> float:
+                B_t = calibration.B_bias_mT + float(d) * axis
+                p = odmr_spectrum(
+                    freqs, B_t,
+                    linewidths=linewidths, contrasts=contrasts,
+                    hyperfine_splitting_mhz=hyperfine_splitting_mhz, nv_axes=nv_axes,
+                )
+                return float(np.sum((p - target) ** 2))
+
+            result = minimize_scalar(_cost, bounds=(lo, hi), method="bounded",
+                                     options={"xatol": 1e-8})
+            if result.success and float(result.fun) < cost_final:
+                return float(result.x)
+
+    return delta_final
 
 
 def estimate_delta_B_vector_mT(

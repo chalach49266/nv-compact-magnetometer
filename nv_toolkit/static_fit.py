@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import numpy as np
-from scipy.optimize import minimize
+from scipy.optimize import least_squares, minimize
 from scipy.signal import find_peaks
 
-from .model import odmr_resonances, odmr_spectrum, optimal_bias_direction
+from .model import odmr_resonances, odmr_resonances_and_gradients, odmr_spectrum, optimal_bias_direction
 
 
 def _find_dip_positions(
@@ -90,14 +90,11 @@ def _compute_jacobian(
     eps: float = 1e-5,
     nv_axes: np.ndarray | None = None,
 ) -> np.ndarray:
-    jacobian = np.zeros((8, 3), dtype=float)
-    for i in range(3):
-        dB = np.zeros(3, dtype=float)
-        dB[i] = eps
-        fp = odmr_resonances(B_total + dB, nv_axes=nv_axes).ravel()
-        fm = odmr_resonances(B_total - dB, nv_axes=nv_axes).ravel()
-        jacobian[:, i] = (fp - fm) / (2 * eps)
-    return jacobian
+    # Analytic Jacobian via odmr_resonances_and_gradients — replaces finite differences.
+    # Returns (8, 3) matrix: d(resonances_sorted)/d(B_total).
+    _, gradients = odmr_resonances_and_gradients(B_total, nv_axes=nv_axes)
+    # gradients shape (4, 2, 3); flatten to (8, 3) matching ravel() order of resonances
+    return gradients.reshape(8, 3)
 
 
 def _match_and_solve(
@@ -162,6 +159,102 @@ def _cost_with_base(
     return spectrum_cost + regularization_cost
 
 
+def _residuals_with_base(
+    B_local_flat: np.ndarray,
+    freqs_sq: np.ndarray,
+    freqs: np.ndarray,
+    measured_norm: np.ndarray,
+    B_base_mT: np.ndarray,
+    linewidths: np.ndarray | float,
+    contrasts: np.ndarray | float,
+    hyperfine_splitting_mhz: float | None,
+    nv_axes: np.ndarray | None,
+    local_field_l2_penalty: float,
+    sqrt_reg: np.ndarray,
+) -> np.ndarray:
+    """Residuals for least_squares: [predicted - measured, sqrt(penalty)*B_local]."""
+    B_local = np.asarray(B_local_flat, dtype=float)
+    B_total = np.asarray(B_base_mT, dtype=float) + B_local
+    predicted = odmr_spectrum(
+        freqs,
+        B_total,
+        linewidths=linewidths,
+        contrasts=contrasts,
+        hyperfine_splitting_mhz=hyperfine_splitting_mhz,
+        nv_axes=nv_axes,
+    )
+    spectrum_res = predicted - measured_norm
+    if float(local_field_l2_penalty) > 0.0:
+        return np.concatenate([spectrum_res, sqrt_reg * B_local])
+    return spectrum_res
+
+
+def _jac_residuals_with_base(
+    B_local_flat: np.ndarray,
+    freqs_sq: np.ndarray,
+    freqs: np.ndarray,
+    measured_norm: np.ndarray,
+    B_base_mT: np.ndarray,
+    linewidths: np.ndarray | float,
+    contrasts: np.ndarray | float,
+    hyperfine_splitting_mhz: float | None,
+    nv_axes: np.ndarray | None,
+    local_field_l2_penalty: float,
+    sqrt_reg: np.ndarray,
+) -> np.ndarray:
+    """Analytic Jacobian of residuals w.r.t. B_local via chain rule through Lorentzians."""
+    B_local = np.asarray(B_local_flat, dtype=float)
+    B_total = np.asarray(B_base_mT, dtype=float) + B_local
+    resonances, grads = odmr_resonances_and_gradients(B_total, nv_axes=nv_axes)
+    # grads: (4, 2, 3) = d(resonance[j,k])/d(B_total[i])
+
+    from .model import D0 as _D0
+    lw_arr = np.atleast_1d(np.asarray(linewidths, dtype=float))
+    ct_arr = np.atleast_1d(np.asarray(contrasts, dtype=float))
+    res_shape = (4, 2)
+    if lw_arr.shape == (4,):
+        lw_arr = lw_arr[:, None]
+    if ct_arr.shape == (4,):
+        ct_arr = ct_arr[:, None]
+    lw_full = np.broadcast_to(lw_arr, res_shape).copy()
+    ct_full = np.broadcast_to(ct_arr, res_shape).copy()
+
+    n_freq = len(freqs)
+    # d(predicted)/d(B_local) shape: (n_freq, 3)
+    dpred_dB = np.zeros((n_freq, 3), dtype=float)
+    for j in range(4):
+        for k in range(2):
+            hw = lw_full[j, k] / 2.0
+            ct = ct_full[j, k]
+            center = resonances[j, k]
+            d_center_dB = grads[j, k]  # (3,)
+            if hyperfine_splitting_mhz is None:
+                df_sq = freqs_sq - 2.0 * center * freqs + center**2  # (freqs - center)^2
+                denom = df_sq + hw**2
+                # d(Lorentzian)/d(center) = ct*hw²*2(f-c)/denom²
+                dL_dcenter = ct * hw**2 * 2.0 * (freqs - center) / (denom**2)
+                # d(spectrum)/d(B) = -sum over peaks of dL/dcenter * dcenter/dB
+                dpred_dB -= dL_dcenter[:, None] * d_center_dB[None, :]
+            else:
+                half_split = 0.5 * float(hyperfine_splitting_mhz)
+                half_ct = 0.5 * ct
+                for shift in (-half_split, half_split):
+                    c2 = center + shift
+                    df_sq = freqs_sq - 2.0 * c2 * freqs + c2**2
+                    denom = df_sq + hw**2
+                    dL_dcenter = half_ct * hw**2 * 2.0 * (freqs - c2) / (denom**2)
+                    dpred_dB -= dL_dcenter[:, None] * d_center_dB[None, :]
+
+    # Clip gradient to match odmr_spectrum's clip(signal, 0, 1) effect: zero gradient
+    # where signal is clipped (rare in normal operating regime, defensive).
+    jac_spectrum = dpred_dB  # (n_freq, 3)
+
+    if float(local_field_l2_penalty) > 0.0:
+        jac_reg = np.diag(sqrt_reg)  # (3, 3)
+        return np.vstack([jac_spectrum, jac_reg])
+    return jac_spectrum
+
+
 def fit_static_field(
     freqs: np.ndarray,
     undampened: np.ndarray,
@@ -218,9 +311,10 @@ def fit_static_spectrum(
 
     B_local_init = _match_and_solve(init_dips, B_base, nv_axes=nv_axes)
 
-    bounds = None
-    method = "Nelder-Mead"
-    options: dict[str, float | int] = {"xatol": 1e-8, "fatol": 1e-12, "maxiter": 20000}
+    # Precompute freqs² once — reused in every residual and Jacobian evaluation (R5).
+    freqs_sq = freqs ** 2
+    sqrt_reg = np.full(3, float(np.sqrt(float(local_field_l2_penalty))), dtype=float)
+
     if local_field_bounds_mT is not None:
         if np.isscalar(local_field_bounds_mT):
             bound_value = abs(float(local_field_bounds_mT))
@@ -230,43 +324,55 @@ def fit_static_spectrum(
             lower_bound, upper_bound = local_field_bounds_mT
             lower_bound = float(lower_bound)
             upper_bound = float(upper_bound)
-        bounds = [(lower_bound, upper_bound)] * 3
         B_local_init = np.clip(B_local_init, lower_bound, upper_bound)
-        method = "L-BFGS-B"
-        options = {"ftol": 1e-12, "maxiter": 20000}
-
-    result = minimize(
-        _cost_with_base,
-        B_local_init,
-        args=(
-            freqs,
-            measured_norm,
-            B_base,
-            linewidths,
-            contrasts,
-            hyperfine_splitting_mhz,
-            nv_axes,
-            local_field_l2_penalty,
-        ),
-        method=method,
-        bounds=bounds,
-        options=options,
-    )
+        args = (freqs_sq, freqs, measured_norm, B_base, linewidths, contrasts,
+                hyperfine_splitting_mhz, nv_axes, local_field_l2_penalty, sqrt_reg)
+        result = least_squares(
+            _residuals_with_base,
+            B_local_init,
+            jac=_jac_residuals_with_base,
+            args=args,
+            method="trf",
+            bounds=([lower_bound] * 3, [upper_bound] * 3),
+            ftol=1e-12,
+            xtol=1e-10,
+            gtol=1e-10,
+            max_nfev=20000,
+        )
+        x_opt = np.asarray(result.x, dtype=float)
+        success = bool(result.success)
+        message = str(result.message)
+        nfev = int(result.nfev)
+        cost = float(np.sum(result.fun ** 2))
+    else:
+        result = minimize(
+            _cost_with_base,
+            B_local_init,
+            args=(freqs, measured_norm, B_base, linewidths, contrasts,
+                  hyperfine_splitting_mhz, nv_axes, local_field_l2_penalty),
+            method="Nelder-Mead",
+            options={"xatol": 1e-8, "fatol": 1e-12, "maxiter": 20000},
+        )
+        x_opt = np.asarray(result.x, dtype=float)
+        success = bool(result.success)
+        message = str(result.message)
+        nfev = int(getattr(result, "nfev", -1))
+        cost = float(result.fun)
 
     if not return_diagnostics:
-        return np.asarray(result.x, dtype=float)
+        return x_opt
 
     return {
-        "B_local_mT": np.asarray(result.x, dtype=float),
-        "B_total_mT": B_base + np.asarray(result.x, dtype=float),
+        "B_local_mT": x_opt,
+        "B_total_mT": B_base + x_opt,
         "B_base_mT": B_base,
         "observed_dips_mhz": observed_dips,
         "initialization_dips_mhz": init_dips,
         "n_observed_dips": int(len(observed_dips)),
         "local_field_l2_penalty": float(local_field_l2_penalty),
         "local_field_bounds_mT": None if local_field_bounds_mT is None else local_field_bounds_mT,
-        "success": bool(result.success),
-        "message": str(result.message),
-        "nfev": int(getattr(result, "nfev", -1)),
-        "cost": float(result.fun),
+        "success": success,
+        "message": message,
+        "nfev": nfev,
+        "cost": cost,
     }

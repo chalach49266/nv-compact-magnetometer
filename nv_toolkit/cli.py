@@ -27,6 +27,22 @@ STAGE_X_AXES = np.array(
     dtype=float,
 )
 
+_AXIS_PRESET_NAMES = ["canonical", "qdm", "stage-x"]
+
+
+def _axes_for_preset(preset: str) -> np.ndarray:
+    """Return the NV axis matrix for a named preset."""
+    norm = str(preset).strip().lower()
+    if norm in {"canonical", "111", "default"}:
+        from .model import NV_AXES
+        return np.asarray(NV_AXES, dtype=float).copy()
+    if norm == "qdm":
+        from .model import QDM_NV_AXES
+        return np.asarray(QDM_NV_AXES, dtype=float).copy()
+    if norm == "stage-x":
+        return np.asarray(STAGE_X_AXES, dtype=float).copy()
+    raise ValueError(f"Unsupported axis preset: {preset}")
+
 class _ScalarExpressionEvaluator(NodeVisitor):
     def visit_Expression(self, node: Expression) -> float:
         return float(self.visit(node.body))
@@ -114,7 +130,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frequency-column", default="frequency_MHz")
     parser.add_argument("--signal-column", default="photoluminescence_mw_on_ADC")
     parser.add_argument("--reference-column", default="photoluminescence_mw_off_ADC")
-    parser.add_argument("--axis-model", choices=["canonical", "111", "qdm", "stage-x"], default="qdm")
+    parser.add_argument("--axis-model", choices=["auto", "canonical", "111", "qdm", "stage-x"], default="qdm")
     parser.add_argument(
         "--nv-axes-inline",
         default=None,
@@ -156,6 +172,8 @@ def _read_numeric_columns(path: Path) -> dict[str, np.ndarray]:
 def _resolve_axes(args: argparse.Namespace) -> tuple[str, np.ndarray | None]:
     if args.nv_axes_inline:
         return "qdm", _parse_inline_nv_axes(args.nv_axes_inline)
+    if args.axis_model == "auto":
+        return "auto", None
     if args.axis_model == "stage-x":
         return "qdm", np.asarray(STAGE_X_AXES, dtype=float)
     return args.axis_model, None
@@ -383,8 +401,124 @@ def _write_plot(path: Path, freqs_mhz: np.ndarray, measured: np.ndarray, predict
     plt.close(fig)
 
 
+def _run_auto_reconstruct(args: argparse.Namespace) -> None:
+    """Option 3: try all axis models, pick best by AIC — no setup knowledge needed."""
+    bias_seed_mT = None if args.bias_seed is None else _parse_vector(args.bias_seed) * (1e-3 if args.bias_unit == "uT" else 1.0)
+    loaded = _load_reconstruction_input(args)
+    freqs_mhz = np.asarray(loaded["freqs_mhz"], dtype=float)
+    measured = np.asarray(loaded["measured"], dtype=float)
+    peak_trace = np.asarray(loaded["peak_trace"], dtype=float)
+    dips = _detect_transition_centers(
+        freqs_mhz, measured, peak_trace, str(loaded["peak_mode"]),
+        max_dips=args.max_dips, min_dips=args.min_dips,
+        min_distance_mhz=args.min_distance_mhz,
+    )
+    if len(dips) < 2:
+        raise ValueError(f"Need at least 2 detected transition centers, got {len(dips)}")
+
+    print(f"Detected {len(dips)} transition centers: {', '.join(f'{float(dip):.3f}' for dip in dips)}")
+    print(f"--- Auto mode: trying axis models: {', '.join(_AXIS_PRESET_NAMES)} ---\n")
+
+    all_trials: list[dict[str, object]] = []
+    for model_name in _AXIS_PRESET_NAMES:
+        axes = _axes_for_preset(model_name)
+        peak_fit = fit_total_field_from_peak_positions(
+            dips, nv_axes_preset=model_name, nv_axes=axes,
+            max_candidates=args.max_candidates,
+        )
+        spectrum_fits: list[dict[str, object]] = []
+        if not args.skip_spectrum_fit:
+            spectrum_fits = _fit_candidate_spectra(
+                freqs_mhz, measured, peak_fit,
+                preset=model_name, nv_axes=axes,
+                bias_seed_mT=bias_seed_mT,
+                max_candidates=args.max_spectrum_candidates,
+                hyperfine_mode=args.hyperfine_mode,
+                initial_hyperfine_splitting_mhz=args.initial_hyperfine_splitting_mhz,
+                local_field_bounds_mT=args.local_field_bounds_mt,
+            )
+
+        best = spectrum_fits[0] if spectrum_fits else None
+        aic = float(best["aic"]) if best is not None else float("inf")
+        rmse = float(best["rmse"]) if best is not None else float("inf")
+        b_norm = float(best["B_total_norm_mT"]) if best is not None else None
+        b_vector = np.asarray(best["B_total_mT"], dtype=float) if best is not None else None
+
+        tag = " ★ BEST" if not all_trials or aic < min(float(t.get("aic", float("inf"))) for t in all_trials) else ""
+        print(
+            f"  {model_name:>10s}: aic={aic:8.3f}  rmse={rmse:.3e}"
+            + (f"  |B|={b_norm:.4f} mT" if b_norm is not None else "  (no fit)")
+            + tag
+        )
+
+        all_trials.append({
+            "axis_model": model_name,
+            "nv_axes_xyz": axes,
+            "aic": aic,
+            "rmse": rmse,
+            "peak_inversion": peak_fit,
+            "spectrum_fits": [{k: v for k, v in fit.items() if k != "predicted"} for fit in spectrum_fits],
+            "best_fit": {k: v for k, v in best.items() if k != "predicted"} if best is not None else None,
+            "predicted": np.asarray(best["predicted"], dtype=float) if best is not None else None,
+        })
+
+    # Pick winner by AIC
+    winner = min(all_trials, key=lambda t: float(t.get("aic", float("inf"))))
+    winner_model = str(winner["axis_model"])
+    winner_best = winner["best_fit"]
+    winner_predicted = np.asarray(winner["predicted"], dtype=float) if winner["predicted"] is not None else None
+
+    print(f"\n→ Selected axis model: {winner_model} (lowest AIC)")
+
+    if winner_best is not None:
+        bv = np.asarray(winner_best["B_total_mT"], dtype=float)
+        print(
+            f"  B_total_mT = ({bv[0]:.4f}, {bv[1]:.4f}, {bv[2]:.4f})  "
+            f"rmse={float(winner_best['rmse']):.3e}  aic={float(winner_best['aic']):.3f}"
+        )
+        if args.plot is not None and winner_predicted is not None:
+            _write_plot(
+                args.plot, freqs_mhz, measured, winner_predicted, dips,
+                f"{args.spectrum_csv.name}: auto→{winner_model} | "
+                f"|B|={float(winner_best['B_total_norm_mT']):.4f} mT, "
+                f"RMSE={float(winner_best['rmse']):.2e}"
+            )
+
+    if args.output_json is not None:
+        summary = {
+            "source_csv": args.spectrum_csv,
+            "mode": "auto",
+            "assumptions": {
+                "input_format": loaded["input_format"],
+                "fit_signal": loaded["fit_signal"],
+                "peak_mode": loaded["peak_mode"],
+                "axis_model": "auto (enumerated)",
+                "bias_seed_mT": bias_seed_mT,
+                "hyperfine_mode": args.hyperfine_mode,
+                "initial_hyperfine_splitting_mhz": args.initial_hyperfine_splitting_mhz,
+                "local_field_bounds_mT": args.local_field_bounds_mt,
+            },
+            "detected_transition_centers_mhz": dips,
+            "trials": [
+                {k: v for k, v in t.items() if k not in ("predicted", "nv_axes_xyz")}
+                for t in all_trials
+            ],
+            "selected_model": winner_model,
+            "selected_axes_xyz": winner["nv_axes_xyz"],
+            "best_fit": winner_best,
+            "plot": str(args.plot) if args.plot is not None else None,
+        }
+        args.output_json.parent.mkdir(parents=True, exist_ok=True)
+        with args.output_json.open("w", encoding="utf-8") as handle:
+            json.dump(_serialize(summary), handle, indent=2)
+        print(f"Wrote {args.output_json}")
+
+
 def _run_reconstruct_cli(args: argparse.Namespace) -> None:
     preset, nv_axes = _resolve_axes(args)
+    if preset == "auto":
+        _run_auto_reconstruct(args)
+        return
     bias_seed_mT = None if args.bias_seed is None else _parse_vector(args.bias_seed) * (1e-3 if args.bias_unit == "uT" else 1.0)
     loaded = _load_reconstruction_input(args)
     freqs_mhz = np.asarray(loaded["freqs_mhz"], dtype=float)

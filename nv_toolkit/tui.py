@@ -20,7 +20,7 @@ from .cli import _detect_transition_centers, _load_reconstruction_input, _parse_
 from .fitting import rank_spectrum_field_candidates
 from .intensity_tracking import build_blockwise_calibrations, estimate_parked_series_fields, reconstruct_vector_timeseries
 from .io import ParkedFrequencySeries, load_spectrum_csv
-from .peaks import fit_local_dips
+from .peaks import _estimate_local_fwhm_mhz, fit_local_dips
 from .peaks import cluster_dip_candidates, collapse_candidate_clusters, detect_baseline_corrected_dip_candidates
 
 
@@ -651,6 +651,12 @@ def _suggest_parked_frequencies(
     gradient = np.gradient(np.asarray(spectrum, dtype=float), np.asarray(freqs_mhz, dtype=float))
     plan: list[ParkedFrequencyPlanEntry] = []
 
+    window_mhz = 8.0
+    successful_linewidths: list[float] = []
+    for fit in local_fits:
+        if fit.success:
+            successful_linewidths.append(float(fit.linewidth_mhz))
+
     for transition_index, center_guess in enumerate(centers[:8]):
         matching_fit = None
         matching_distance = float("inf")
@@ -658,33 +664,40 @@ def _suggest_parked_frequencies(
             if not fit.success:
                 continue
             distance = abs(float(fit.center_mhz) - float(center_guess))
+            if distance > window_mhz / 2.0:
+                continue
             if distance < matching_distance:
                 matching_fit = fit
                 matching_distance = distance
 
         center = float(matching_fit.center_mhz) if matching_fit is not None else float(center_guess)
-        linewidth = float(matching_fit.linewidth_mhz) if matching_fit is not None else 4.0
-        search_half_window_mhz = max(0.75 * linewidth, 2.0)
-
-        left_mask = (freqs_mhz < center) & (freqs_mhz >= center - search_half_window_mhz)
-        right_mask = (freqs_mhz > center) & (freqs_mhz <= center + search_half_window_mhz)
-        if not np.any(left_mask) or not np.any(right_mask):
-            raise ValueError(f"Could not find left/right slope windows around transition {transition_index} at {center:.3f} MHz")
-
-        left_indices = np.flatnonzero(left_mask)
-        right_indices = np.flatnonzero(right_mask)
-        left_best = int(left_indices[int(np.argmax(np.abs(gradient[left_mask])))])
-        right_best = int(right_indices[int(np.argmax(np.abs(gradient[right_mask])))])
+        if matching_fit is not None:
+            linewidth = float(matching_fit.linewidth_mhz)
+        else:
+            mask = np.abs(np.asarray(freqs_mhz, dtype=float) - float(center_guess)) <= window_mhz
+            lf = np.asarray(freqs_mhz, dtype=float)[mask]
+            lv = np.asarray(spectrum, dtype=float)[mask]
+            linewidth = _estimate_local_fwhm_mhz(lf, lv, window_mhz)
+            if linewidth < 0.2 or linewidth >= 29.0:
+                if successful_linewidths:
+                    linewidth = float(np.median(successful_linewidths))
+                else:
+                    raise ValueError(
+                        f"Could not estimate linewidth for transition {transition_index} at {center_guess:.3f} MHz: "
+                        "no successful fits and peak-widths estimate is degenerate"
+                    )
+        f_minus = center - linewidth / 2.0
+        f_plus = center + linewidth / 2.0
 
         plan.append(
             ParkedFrequencyPlanEntry(
                 transition_index=int(transition_index),
                 center_mhz=center,
                 linewidth_mhz=linewidth,
-                frequency_minus_mhz=float(freqs_mhz[left_best]),
-                frequency_plus_mhz=float(freqs_mhz[right_best]),
-                slope_minus_per_mhz=float(gradient[left_best]),
-                slope_plus_per_mhz=float(gradient[right_best]),
+                frequency_minus_mhz=f_minus,
+                frequency_plus_mhz=f_plus,
+                slope_minus_per_mhz=float(np.interp(f_minus, freqs_mhz, gradient)),
+                slope_plus_per_mhz=float(np.interp(f_plus, freqs_mhz, gradient)),
             )
         )
 

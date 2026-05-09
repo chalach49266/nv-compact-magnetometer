@@ -26,9 +26,13 @@ QDM_NV_AXES = np.array(
     dtype=float,
 ) / np.sqrt(3.0)
 
-
 def _resolved_nv_axes(nv_axes: np.ndarray | None = None) -> np.ndarray:
-    axes = NV_AXES if nv_axes is None else np.asarray(nv_axes, dtype=float)
+    # Fast path: module-level constants are already normalized
+    if nv_axes is None or nv_axes is NV_AXES:
+        return NV_AXES
+    if nv_axes is QDM_NV_AXES:
+        return QDM_NV_AXES
+    axes = np.asarray(nv_axes, dtype=float)
     if axes.shape != (4, 3):
         raise ValueError(f"nv_axes must have shape (4, 3), got {axes.shape}")
     norms = np.linalg.norm(axes, axis=1)
@@ -50,12 +54,25 @@ def named_nv_axes(name: str | None = None) -> np.ndarray:
 
 
 def _cubic_roots(B_mag_sq: float, B_axial: float) -> np.ndarray:
-    coeffs = [
-        1.0,
-        -2.0 * D0,
-        D0**2 - GAMMA**2 * B_mag_sq,
-        GAMMA**2 * (B_mag_sq - B_axial**2) * D0,
-    ]
+    # Viète's trigonometric formula for the depressed cubic.
+    # Polynomial: λ³ − 2D·λ² + (D²−γ²|B|²)·λ + γ²(|B|²−B∥²)·D = 0
+    p2 = D0**2 - GAMMA**2 * float(B_mag_sq)
+    p3 = GAMMA**2 * (float(B_mag_sq) - float(B_axial) ** 2) * D0
+
+    # Depress via λ = t + 2D/3 → t³ + pt + q = 0
+    shift = 2.0 * D0 / 3.0
+    p = p2 - (D0**2) * 4.0 / 3.0
+    q = (2.0 * D0**3) / 13.5 - D0 * p2 / 3.0 + p3
+    discriminant = -(4.0 * p**3 + 27.0 * q**2)
+    if discriminant >= 0.0:
+        # Three distinct real roots via arccosine form
+        m = 2.0 * np.sqrt(-p / 3.0)
+        arg = np.clip(3.0 * q / (p * m), -1.0, 1.0)
+        theta = np.arccos(arg)
+        roots = m * np.cos((theta - 2.0 * np.pi * np.arange(3)) / 3.0) + shift
+        return np.sort(roots)
+    # Fallback for non-real-root regime (should not occur in normal NV operating range)
+    coeffs = [1.0, -2.0 * D0, p2, p3]
     return np.sort(np.real(np.roots(coeffs)))
 
 
@@ -65,12 +82,14 @@ def odmr_resonances_and_gradients(
 ) -> tuple[np.ndarray, np.ndarray]:
     B_total = np.asarray(B_total, dtype=float)
     B_mag_sq = float(np.dot(B_total, B_total))
-    axes = _resolved_nv_axes(nv_axes)
+    axes = _resolved_nv_axes(nv_axes)  # (4, 3)
 
     resonances = np.zeros((4, 2), dtype=float)
     gradients = np.zeros((4, 2, 3), dtype=float)
 
-    for j, n_j in enumerate(axes):
+    for j in range(4):
+        n_j = axes[j]
+        # Use scalar dot product per axis for consistent FP results with odmr_resonances
         B_axial = float(np.dot(B_total, n_j))
         roots = _cubic_roots(B_mag_sq, B_axial)
 
@@ -82,9 +101,9 @@ def odmr_resonances_and_gradients(
             dP_dlam = 3 * lam**2 - 4 * D0 * lam + (D0**2 - GAMMA**2 * B_mag_sq)
             if abs(dP_dlam) < 1e-30:
                 continue
-            for i in range(3):
-                dP_dBi = 2 * GAMMA**2 * (B_total[i] * (D0 - lam) - D0 * B_axial * n_j[i])
-                root_grads[k, i] = -dP_dBi / dP_dlam
+            # dP/dBi = 2γ²(Bi(D−λ) − D·B∥·n_j_i), shape (3,)
+            dP_dB = 2 * GAMMA**2 * (B_total * (D0 - lam) - D0 * B_axial * n_j)
+            root_grads[k] = -dP_dB / dP_dlam
 
         gradients[j, 0] = root_grads[1] - root_grads[0]
         gradients[j, 1] = root_grads[2] - root_grads[0]
@@ -114,11 +133,12 @@ def invert_odmr_pair(
 
 
 def odmr_resonances(B_total: np.ndarray, nv_axes: np.ndarray | None = None) -> np.ndarray:
+    B_total = np.asarray(B_total, dtype=float)
     B_mag_sq = float(np.dot(B_total, B_total))
-    resonances = np.zeros((4, 2), dtype=float)
     axes = _resolved_nv_axes(nv_axes)
-    for j, n_j in enumerate(axes):
-        roots = _cubic_roots(B_mag_sq, float(np.dot(B_total, n_j)))
+    resonances = np.zeros((4, 2), dtype=float)
+    for j in range(4):
+        roots = _cubic_roots(B_mag_sq, float(np.dot(B_total, axes[j])))
         resonances[j, 0] = roots[1] - roots[0]
         resonances[j, 1] = roots[2] - roots[0]
     return resonances

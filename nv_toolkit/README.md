@@ -107,6 +107,76 @@ For the current live-like April 29 demo, use the manual in
 It walks through the browser operator, 16 parked-frequency plan generation, and
 the noisy synthetic stream used for real-time reconstruction.
 
+## FPGA Operator CLI
+
+Use `mag-operator` when acquisition hardware owns data collection and Python
+should only write/read CSV contracts. The command is wired in `pyproject.toml`
+as:
+
+```text
+mag-operator = "nv_toolkit.operator_cli:main"
+```
+
+The implementation file is [operator_cli.py](operator_cli.py). Keep that file as
+a compact orchestration layer; reusable algorithms should live in the lower-level
+modules listed below.
+
+Step 1: generate the 16 parked microwave frequencies from a full ODMR spectrum.
+
+```bash
+mag-operator plan \
+  --full-scan path/to/full_odmr.csv \
+  --output path/to/parked_plan_16freq.csv
+```
+
+Step 2: reconstruct B from the collected parked-intensity CSV.
+
+```bash
+mag-operator reconstruct \
+  --full-scan path/to/full_odmr.csv \
+  --plan path/to/parked_plan_16freq.csv \
+  --parked-data path/to/collected_parked_data.csv \
+  --output path/to/operator_vector_rows.csv \
+  --projections-output path/to/operator_projection_rows.csv
+```
+
+`--parked-format` defaults to `auto`; pass `wide`, `long`, or `toolkit` only if
+auto-detection fails.
+
+Plan CSV contract:
+
+| Column | Meaning |
+|---|---|
+| `block_index` | ODMR transition block, one minus/plus pair per block |
+| `point_in_block` | `0` for first flank point, `1` for second flank point |
+| `point_index` | acquisition order; wide collected data follows this order |
+| `transition_index` | transition index from detected ODMR centers |
+| `transition_center_mhz` | fitted/detected transition center |
+| `linewidth_mhz` | local linewidth estimate used for parked-point choice |
+| `frequency_mhz` | microwave frequency for FPGA/acquisition to park at |
+| `slope_per_mhz` | local ODMR slope at that parked point |
+
+Collected-data formats accepted by `reconstruct`:
+
+- Wide: one time column named `time_s`, `time`, `timestamp`, or `timestamp_epoch_s`, followed by 16 intensity columns in `point_index` order.
+- Long: one row per parked frequency with time, frequency, and intensity columns.
+- Toolkit: expanded rows with `save_id`, `timestamp_epoch_s`, `block_index`, `point_in_block`, `frequency_mhz`, and `normalized_intensity`.
+
+Output CSVs:
+
+- `operator_vector_rows.csv`: one reconstructed vector per timestamp, including `delta_Bx_uT`, `delta_By_uT`, `delta_Bz_uT`, residual, rank, condition number, and status.
+- `operator_projection_rows.csv`: optional per-block projection/debug rows before vector inversion.
+
+File map for the reusable operator path:
+
+| File | Role |
+|---|---|
+| `nv_toolkit/operator_cli.py` | Compact command-line control surface for FPGA plan/reconstruct |
+| `nv_toolkit/tui.py` | Current shared operator APIs: ODMR loading, plan generation, parked-data loading, live snapshot reconstruction |
+| `nv_toolkit/intensity_tracking.py` | Parked-frequency calibration, per-block projections, vector inversion |
+| `nv_toolkit/operator_web.py` | Browser wrapper around the same concepts; not required for FPGA CLI |
+| `tests/test_nv_toolkit.py` | Regression tests for plan/reconstruct behavior and CSV format conversion |
+
 ## Base-field CSV formats
 
 Supported base-field CSV formats include:

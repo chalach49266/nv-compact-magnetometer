@@ -26,33 +26,33 @@
 \setbeamerfont{block title}{series=\bfseries,size=\small}
 \setbeamerfont{block body}{size=\scriptsize}
 \setbeamertemplate{footline}{%
-  \hfill{\tiny Lock-in handoff \insertframenumber/\inserttotalframenumber}\hspace{0.6em}\vspace{0.35em}
+  \hfill{\tiny Lock-in update \insertframenumber/\inserttotalframenumber}\hspace{0.6em}\vspace{0.35em}
 }
 
 \newcommand{\code}[1]{\texttt{\scriptsize #1}}
 \newcommand{\assetdir}{assets/lockin_progress}
 
-\title{Lock-in Progress Handoff}
-\subtitle{Notebook-derived outputs for new lock-in staff}
+\title{Lock-in Update}
+\subtitle{Multipoint parked-frequency lock-in working end-to-end}
 \date{May 7, 2026}
 
 \begin{document}
 
-\begin{frame}{Lock-in Progress Handoff}
+\begin{frame}{Where the lock-in is now}
 \vspace{-0.2em}
 \begin{columns}[T,totalwidth=\textwidth]
 \begin{column}{0.62\textwidth}
-\begin{block}{What is working now}
+\begin{block}{What's working}
 \begin{itemize}\setlength{\itemsep}{0.3em}
-  \item The notebook path is ODMR sweep, parked-frequency plan, multipoint lock-in acquire, two-point peak inference, then vector reconstruction.
-  \item The parked-frequency acquire now measures 16 nonuniform frequencies in one uploaded FPGA program through \code{MultipointLockinODMR}.
-  \item Reference readouts use an MW off data by setting an delay time of MW on/off at around 1700 us.
-  \item Live mode builds one program outside the loop and asserts \code{pre\_init=False}; this prevents the recurring per-batch peaking transient.
+  \item Full pipeline runs end-to-end: ODMR sweep $\to$ parked-frequency plan $\to$ multipoint acquire $\to$ $\Delta f$ inference $\to$ B-vector reconstruction.
+  \item All 16 parked frequencies measured in a single FPGA program (\code{MultipointLockinODMR}) — no more per-frequency upload overhead.
+  \item Reference shot is now genuinely MW-off: a long ($\sim$1700 $\mu$s) relax delay between signal and reference lets the spins repolarize, so the reference no longer carries dip structure.
+  \item Live mode builds the program once outside the batch loop and uses \code{pre\_init=False} — the per-batch peaking spike from 01\_basic is gone.
 \end{itemize}
 \end{block}
 \end{column}
 \begin{column}{0.34\textwidth}
-\begin{block}{Notebook run snapshot}
+\begin{block}{May 7 run snapshot}
 \resizebox{\linewidth}{!}{%
 \begin{tabular}{@{}ll@{}}
 \toprule
@@ -68,13 +68,11 @@ Vector rank-ok & 281 / 281 \\
 \end{tabular}
 }
 \end{block}
-\vspace{0.5em}
-{\tiny Sources read only: \code{Lockin\_module.ipynb} and \code{LOCKIN\_ACQUIRE.md}.}
 \end{column}
 \end{columns}
 \end{frame}
 
-\begin{frame}{MW-Off Reference Issue Resolved}
+\begin{frame}{Reference shots are actually MW-off now}
 \vspace{-0.4em}
 \begin{columns}[T,totalwidth=\textwidth]
 \begin{column}{0.56\textwidth}
@@ -84,27 +82,23 @@ Vector rank-ok & 281 / 281 \\
 \begin{column}{0.40\textwidth}
 \begin{block}{What changed}
 \begin{itemize}\setlength{\itemsep}{0.35em}
-  \item The ODMR cell now records both MW-on signal and MW-off reference in the same sweep.
-  \item MW-off is separated using a long MW on/off delay, about 1700 us, so the reference no longer carries the ODMR dips.
-  \item The contrast trace is now the clean signal-minus-reference response used for planning parked frequencies.
+  \item Each sweep point now grabs MW-on signal and MW-off reference in one pass.
+  \item Long ($\sim$1700 $\mu$s) delay between the two integrations lets the always-on laser repolarize the spins, so the reference doesn't carry residual dip structure.
+  \item The contrast trace = signal $-$ reference is what feeds parked-frequency planning.
 \end{itemize}
-\end{block}
-\begin{block}{Why new staff should care}
-\scriptsize
-All downstream lock-in math assumes each parked point has a paired reference count. If the reference still contains resonance structure, the normalization and two-point frequency inference are biased.
 \end{block}
 \end{column}
 \end{columns}
 \end{frame}
 
-\begin{frame}{Parked-Frequency Plan from ODMR}
+\begin{frame}{Parked-frequency plan from the ODMR fit}
 \vspace{-0.3em}
 \begin{columns}[T,totalwidth=\textwidth]
 \begin{column}{0.62\textwidth}
 \includegraphics[width=\linewidth]{\assetdir/parked_frequency_overlay.png}
 \end{column}
 \begin{column}{0.36\textwidth}
-\begin{block}{Plan table written by notebook}
+\begin{block}{Plan output}
 \centering
 \tiny
 \begin{tabular}{@{}rrrrr@{}}
@@ -123,33 +117,32 @@ Blk & Center & Line & $f_-$ & $f_+$ \\
 \bottomrule
 \end{tabular}
 \end{block}
-\begin{block}{Why this matters}
+\begin{block}{Custom program}
 \scriptsize
-The custom program is needed because these parked points are not uniformly spaced, so a normal linear Qick sweep is not the right abstraction.
+The 16 points aren't evenly spaced — they're the steepest-slope flank points of the 8 NV transitions. A stock QICK linear sweep can't hit non-uniform frequencies, hence \code{MultipointLockinODMR} on the next slide.
 \end{block}
 \end{column}
 \end{columns}
 \end{frame}
 
-\begin{frame}{Single-Program Multipoint Acquire}
+\begin{frame}{One FPGA program for all 16 parked points}
 \vspace{-0.25em}
 \begin{columns}[T,totalwidth=\textwidth]
 \begin{column}{0.48\textwidth}
-\begin{block}{Notebook output}
+\begin{block}{What it does}
 \begin{itemize}\setlength{\itemsep}{0.35em}
-  \item Built one \code{MultipointLockinODMR} program for 16 frequencies.
-  \item Predicted FPGA work: 68 ms per batch, or 6.8 ms per rep times 10 reps.
-  \item Actual first batch in the saved notebook output: 116 ms.
-  \item Output: \code{multipoint\_lockin\_collected.csv}, one wide row with \code{peak\_NN}, \code{peak\_NN\_ref}, and \code{peak\_NN\_freq\_mhz}.
+  \item One \code{MultipointLockinODMR} program holds the ASM for all 16 frequencies — uses \code{mw\_frequency\_register.set\_to(f)} inside \code{body()} to hop between them.
+  \item Predicted FPGA work: 68 ms per batch (6.8 ms/rep $\times$ 10 reps). Measured first batch: 116 ms.
+  \item Output: \code{multipoint\_lockin\_collected.csv} — one wide row per batch with \code{peak\_NN}, \code{peak\_NN\_ref}, \code{peak\_NN\_freq\_mhz}.
 \end{itemize}
 \end{block}
-\begin{block}{Guardrail for new staff}
+\begin{block}{Build once, not per batch}
 \scriptsize
-Do not instantiate \code{MultipointLockinODMR} inside a batch loop. Build once, then loop over \code{prog.acquire(progress=False)}.
+If you instantiate \code{MultipointLockinODMR} inside the batch loop, it re-uploads the FPGA program every iteration ($\sim$300 ms each — kills the speedup). Build once outside, then call \code{prog.acquire(progress=False)} in the loop.
 \end{block}
 \end{column}
 \begin{column}{0.49\textwidth}
-\begin{block}{Example acquired columns}
+\begin{block}{Example columns from the wide CSV}
 \centering
 \tiny
 \begin{tabular}{@{}rrrr@{}}
@@ -165,52 +158,86 @@ Peak & Freq MHz & Signal ADC & Ref ADC \\
 \bottomrule
 \end{tabular}
 \end{block}
-\begin{block}{Timing comparison in docs}
+\begin{block}{Speedup vs the old loop}
 \scriptsize
-Old 17-program loop at \code{reps=100}: about 6.6 s per batch in a good case, worse with network jitter. New multipoint path: about 700 ms per batch at \code{reps=100} after the one-time upload.
+Old 17-program loop at \code{reps=100}: $\sim$6.6 s per batch, worse with network jitter. New multipoint at the same reps: $\sim$700 ms per batch after the one-time upload — about 10$\times$ faster.
 \end{block}
 \end{column}
 \end{columns}
 \end{frame}
 
-\begin{frame}{Math 1/2: Dip Shift Causes Asymmetric Intensity Change}
+\begin{frame}{Two-Point $\Delta f$ Formula}
+\vspace{-0.4em}
+\begin{columns}[T,totalwidth=\textwidth]
+\begin{column}{0.58\textwidth}
+\begin{block}{Derivation}
+\small
+Linearize the spectrum at each parked point as $f_0 \!\to\! f_0+\Delta f$:
+\[
+S_-(t)\approx b_- - m_-\,\Delta f,\quad
+S_+(t)\approx b_+ - m_+\,\Delta f .
+\]
+Subtract to cancel common-mode drift:
+\[
+\Delta d_{\rm now}-\Delta d_{\rm ref}=(m_- - m_+)\,\Delta f .
+\]
+\[
+\boxed{\;\Delta f_k=\dfrac{\Delta d_{\rm now}-\Delta d_{\rm ref}}{m_- - m_+},
+\qquad
+f_{{\rm new},k}=f_{0,k}+\Delta f_k\;}
+\]
+\end{block}
+\end{column}
+\begin{column}{0.40\textwidth}
+\begin{block}{Symbols}
+\scriptsize
+$b_\pm,\ m_\pm$: PL and slope at $f_\pm$ from the reference ODMR.\\[0.15em]
+$\Delta d_{\rm now}=S_+(t)-S_-(t)$;\ \ $\Delta d_{\rm ref}=b_+-b_-$.\\[0.15em]
+$\Delta B_{{\rm proj},k}=\Delta f_k/\|\mathrm{d}f/\mathrm{d}B\|_k$.
+\end{block}
+\begin{block}{Block 4, latest batch}
+\centering\tiny
+\begin{tabular}{@{}lr@{}}
+\toprule
+$m_-$,\ $m_+$ & $-4.17{\times}10^{-4}$,\ $+5.36{\times}10^{-4}$\,/MHz \\
+$\Delta d_{\rm now}-\Delta d_{\rm ref}$ & $-9.43{\times}10^{-4}$ \\
+$\Delta f$ & $+0.990$ MHz \\
+$f_{\rm new}$ & $2862.979$ MHz \\
+\bottomrule
+\end{tabular}
+\end{block}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Why Denominator is $m_- - m_+$, Not $m_+ - m_-$}
 \vspace{-0.6em}
 \begin{columns}[T,totalwidth=\textwidth]
 \begin{column}{0.50\textwidth}
 \centering
 \begin{tikzpicture}[scale=0.55,every node/.style={font=\tiny}]
-  % axes
   \draw[->,gray!60] (-0.2,0) -- (10.5,0) node[right,black] {$f$};
   \draw[->,gray!60] (0,-0.2) -- (0,4.6) node[above,black] {$I(f)$};
-  % reference dip (centered at f0 = 5)
   \draw[very thick,nvblue,smooth] plot[domain=0.2:9.8,samples=120]
     (\x,{4 - 2.5/(1 + ((\x-5)/1.0)^2)});
-  % shifted dip — moved RIGHT to center 6 (Δf > 0)
   \draw[very thick,dashed,nvteal,smooth] plot[domain=0.2:9.8,samples=120]
     (\x,{4 - 2.5/(1 + ((\x-6)/1.0)^2)});
-  % vertical guides at f-, f0, f+
   \draw[dotted,gray] (4,0) -- (4,4);
   \draw[dotted,gray] (5,0) -- (5,4);
   \draw[dotted,gray] (6,0) -- (6,4);
-  % reference intensity dots at parked points
   \fill[nvblue] (4,2.75) circle (2.5pt);
   \fill[nvblue] (6,2.75) circle (2.5pt);
-  % shifted intensity dots
   \fill[nvteal] (4,3.5) circle (2.5pt);
   \fill[nvteal] (6,1.5) circle (2.5pt);
-  % red arrows: how the parked-point intensity changes
   \draw[-{Latex[length=1.6mm]},red,thick] (4,2.85) -- (4,3.4);
   \draw[-{Latex[length=1.6mm]},red,thick] (6,2.65) -- (6,1.6);
-  % dip-shift indicator
   \draw[-{Latex[length=2mm]},nvteal,very thick] (5,4.25) -- (6,4.25);
-  \node[nvteal,above,font=\tiny] at (5.5,4.25) {dip moves $\to$};
-  % axis tick labels
+  \node[nvteal,above,font=\tiny] at (5.5,4.25) {dip $\to$};
   \node[below] at (4,0) {$f_-$};
   \node[below] at (5,0) {$f_0$};
   \node[below] at (6,0) {$f_+$};
-  % panel caption
   \node[nvblue,font=\scriptsize\bfseries] at (5,-0.95)
-    {(a)\ \ $\Delta f>0$:\ \ $S_-\!\uparrow$, $S_+\!\downarrow$};
+    {(a)\ \ $\Delta f>0$:\ $\Delta d_{\rm now}-\Delta d_{\rm ref}<0$};
 \end{tikzpicture}
 \end{column}
 \begin{column}{0.50\textwidth}
@@ -218,10 +245,8 @@ Old 17-program loop at \code{reps=100}: about 6.6 s per batch in a good case, wo
 \begin{tikzpicture}[scale=0.55,every node/.style={font=\tiny}]
   \draw[->,gray!60] (-0.2,0) -- (10.5,0) node[right,black] {$f$};
   \draw[->,gray!60] (0,-0.2) -- (0,4.6) node[above,black] {$I(f)$};
-  % reference dip (centered at 5)
   \draw[very thick,nvblue,smooth] plot[domain=0.2:9.8,samples=120]
     (\x,{4 - 2.5/(1 + ((\x-5)/1.0)^2)});
-  % shifted dip — moved LEFT to center 4 (Δf < 0)
   \draw[very thick,dashed,nvteal,smooth] plot[domain=0.2:9.8,samples=120]
     (\x,{4 - 2.5/(1 + ((\x-4)/1.0)^2)});
   \draw[dotted,gray] (4,0) -- (4,4);
@@ -234,132 +259,44 @@ Old 17-program loop at \code{reps=100}: about 6.6 s per batch in a good case, wo
   \draw[-{Latex[length=1.6mm]},red,thick] (4,2.65) -- (4,1.6);
   \draw[-{Latex[length=1.6mm]},red,thick] (6,2.85) -- (6,3.4);
   \draw[-{Latex[length=2mm]},nvteal,very thick] (5,4.25) -- (4,4.25);
-  \node[nvteal,above,font=\tiny] at (4.5,4.25) {$\leftarrow$ dip moves};
+  \node[nvteal,above,font=\tiny] at (4.5,4.25) {$\leftarrow$ dip};
   \node[below] at (4,0) {$f_-$};
   \node[below] at (5,0) {$f_0$};
   \node[below] at (6,0) {$f_+$};
   \node[nvblue,font=\scriptsize\bfseries] at (5,-0.95)
-    {(b)\ \ $\Delta f<0$:\ \ $S_-\!\downarrow$, $S_+\!\uparrow$};
+    {(b)\ \ $\Delta f<0$:\ $\Delta d_{\rm now}-\Delta d_{\rm ref}>0$};
 \end{tikzpicture}
 \end{column}
 \end{columns}
-\vspace{0.45em}
-\begin{columns}[T,totalwidth=\textwidth]
-\begin{column}{0.50\textwidth}
-\begin{block}{Why park on the flanks instead of re-sweeping}
+\vspace{0.5em}
+\begin{block}{Sign self-consistency}
 \scriptsize
-The reference ODMR sweep tells us where each dip sits. We park at
-$f_-$ and $f_+$ on the steep flanks (one MW frequency on each side of
-$f_{0,k}$). When the dip shifts by $\Delta f$, the two parked
-intensities respond in \emph{opposite} directions: one flank exits the
-dip (intensity rises), the other gets pulled deeper into it (intensity
-falls). The signed difference $S_+(t)-S_-(t)$ encodes both the
-\emph{sign} and the \emph{size} of $\Delta f$ in a single scalar — no
-re-sweeping needed.
+Slope signs are fixed by the dip shape: $m_-<0$ (left flank descends),
+$m_+>0$ (right flank ascends), so $m_- - m_+ < 0$ \emph{always}. The
+numerator flips sign with the dip's direction (panels a, b above).
+Combining: $(-)/(-) = +$ in (a) and $(+)/(-) = -$ in (b), so $\Delta f$
+inherits the dip's true sign of motion. Flipping the denominator order
+to $m_+ - m_-$ (always $>0$) would invert every $\Delta f$.
 \end{block}
-\end{column}
-\begin{column}{0.50\textwidth}
-\begin{block}{Slope is the conversion factor}
-\scriptsize
-The rate at which $S_+-S_-$ changes per MHz of dip shift is the slope
-difference $m_- - m_+$ (units: intensity\,/\,MHz). It is a property of
-the dip's \emph{shape}, captured once during the reference ODMR sweep.
-The same intensity drop on a sharp dip vs.\ a broad dip implies very
-different $\Delta f$, so without the slope you cannot turn an intensity
-error into a frequency error. Slide 2 shows the formal derivation.
-\end{block}
-\end{column}
-\end{columns}
-\end{frame}
-
-\begin{frame}{Math 2/2: Linearization, $\Delta f$ Formula, and Example}
-\vspace{-0.25em}
-\begin{columns}[T,totalwidth=\textwidth]
-\begin{column}{0.54\textwidth}
-\begin{block}{Linearize the spectrum at the parked points}
-\small
-The dip shape depends only on $(f-f_0)$. A small shift
-$f_0 \to f_0 + \Delta f$ changes the intensity at fixed $f$ to first
-order by
-\[
-I(f,\,f_0+\Delta f)
-\approx I(f,\,f_0)
-- \tfrac{\partial I}{\partial f}\big|_{f_0}\,\Delta f .
-\]
-At the two parked points this gives
-\[
-S_-(t) \approx b_- - m_-\,\Delta f, \qquad
-S_+(t) \approx b_+ - m_+\,\Delta f,
-\]
-and subtracting cancels common-mode drift in $b_\pm$:
-\[
-\underbrace{(S_+ - S_-)_{\rm now}}_{\Delta d_{\rm now}}
-\;-\;\underbrace{(b_+ - b_-)}_{\Delta d_{\rm ref}}
-=(m_- - m_+)\,\Delta f .
-\]
-Solve for $\Delta f$:
-\[
-\boxed{\;\Delta f_k =
-\dfrac{\Delta d_{\rm now}-\Delta d_{\rm ref}}{m_- - m_+},
-\qquad
-f_{{\rm new},k}=f_{0,k}+\Delta f_k\;}
-\]
-\end{block}
-\end{column}
-\begin{column}{0.44\textwidth}
-\begin{block}{Symbol legend and sanity checks}
-\scriptsize
-\begin{itemize}\setlength{\itemsep}{0.15em}
-  \item $b_\pm$: normalized PL at $f_\pm$ from the reference ODMR sweep.
-  \item $m_\pm = \mathrm{d}I/\mathrm{d}f$ at $f_\pm$. Notebook asserts
-        $m_- < 0 < m_+$ (left flank descends, right flank ascends), so
-        the denominator $m_- - m_+ < 0$.
-  \item $\Delta d_{\rm now} = S_+(t)-S_-(t)$ from the latest batch;
-        $\Delta d_{\rm ref} = b_+ - b_-$ from the calibration sweep.
-  \item Sign: positive $\Delta f$ from panel (a) gives
-        $\Delta d_{\rm now}<\Delta d_{\rm ref}$, i.e.\ negative numerator.
-        Negative $\div$ negative $=$ positive $\Delta f$. \checkmark
-  \item Symmetric-flank limit ($m_-=-m_+$) recovers the textbook
-        $\Delta f = (\Delta d_{\rm now}-\Delta d_{\rm ref})/(2m_-)$.
-  \item Field projection along this transition's NV axis:
-        $\Delta B_{{\rm proj},k} = \Delta f_k / \|\mathrm{d}f/\mathrm{d}B\|_k$.
-\end{itemize}
-\end{block}
-\begin{block}{Latest batch, block 4 (numbers from notebook)}
-\centering
-\tiny
-\begin{tabular}{@{}lr@{}}
-\toprule
-$m_-$, $m_+$ & $-4.17{\times}10^{-4}$,\ $+5.36{\times}10^{-4}$ per MHz \\
-$\Delta d_{\rm now}$ & $-1.47{\times}10^{-4}$ \\
-$\Delta d_{\rm ref}$ & $+7.96{\times}10^{-4}$ \\
-$\Delta d_{\rm now}-\Delta d_{\rm ref}$ & $-9.43{\times}10^{-4}$ \\
-$\Delta f$ & $+0.990$ MHz \\
-$f_{\rm new}$ & $2862.979$ MHz \\
-\bottomrule
-\end{tabular}
-\end{block}
-\end{column}
-\end{columns}
 \end{frame}
 
 
-\begin{frame}{Live Lock-in Run: Drift and Noise Floor}
+\begin{frame}{Live run: drift and noise floor}
 \vspace{-0.35em}
 \begin{columns}[T,totalwidth=\textwidth]
 \begin{column}{0.58\textwidth}
 \includegraphics[width=\linewidth]{\assetdir/live_delta_f_timeseries.png}
 \end{column}
 \begin{column}{0.40\textwidth}
-\begin{block}{Live run summary}
+\begin{block}{Run summary}
 \begin{itemize}\setlength{\itemsep}{0.25em}
-  \item Run: live CSV \code{20260507\_141355}.
-  \item 281 batches over 21.0 s, 13.4 Hz update rate.
-  \item Timing line: predicted 68 ms; actual median 12 ms, p95 15 ms, max 17 ms.
-  \item Watchdog never fired in the saved run.
+  \item Live CSV \code{20260507\_141355}.
+  \item 281 batches over 21.0 s $\to$ 13.4 Hz update rate.
+  \item Per-batch timing: predicted 68 ms; actual median 12 ms, p95 15 ms, max 17 ms.
+  \item Watchdog never fired.
 \end{itemize}
 \end{block}
-\begin{block}{Per-block live statistics}
+\begin{block}{Per-block stats}
 \centering
 \tiny
 \begin{tabular}{@{}rrrr@{}}
@@ -382,7 +319,7 @@ Blk & mean $\Delta f$ & std $\Delta f$ & std $\Delta B$ \\
 \end{columns}
 \end{frame}
 
-\begin{frame}{Live Inferred New Peak Frequencies}
+\begin{frame}{Inferred peak frequencies (live)}
 \vspace{-0.55em}
 \begin{columns}[T,totalwidth=\textwidth]
 \begin{column}{0.49\textwidth}
@@ -393,10 +330,10 @@ Blk & mean $\Delta f$ & std $\Delta f$ & std $\Delta B$ \\
 \end{column}
 \end{columns}
 \vspace{0.25em}
-{\tiny Notebook post-processing figure: each block plots $f_{\rm new}(t)=f_0+\Delta f(t)$ with the dashed reference $f_0$ from the ODMR calibration.}
+{\tiny Each block: $f_{\rm new}(t)=f_0+\Delta f(t)$ in solid, with the dashed reference $f_0$ from the ODMR calibration.}
 \end{frame}
 
-\begin{frame}{B-field Reconstruction Output}
+\begin{frame}{B-field reconstruction output}
 \vspace{-0.35em}
 \begin{columns}[T,totalwidth=\textwidth]
 \begin{column}{0.58\textwidth}
@@ -405,16 +342,14 @@ Blk & mean $\Delta f$ & std $\Delta f$ & std $\Delta B$ \\
 \includegraphics[width=\linewidth]{\assetdir/live_bfield_magnitude.png}
 \end{column}
 \begin{column}{0.40\textwidth}
-\begin{block}{Notebook reconstruction status}
+\begin{block}{Reconstruction stats}
 \begin{itemize}\setlength{\itemsep}{0.3em}
-  \item Input: wide live CSV from the same 281-sample run.
-  \item Status: ok.
-  \item Samples: 281.
-  \item Rank-ok: 281.
+  \item Input: wide live CSV from the 281-sample run above.
+  \item Samples: 281; rank-ok: 281/281.
   \item Matrix condition number: 14.08.
 \end{itemize}
 \end{block}
-\begin{block}{Vector component statistics}
+\begin{block}{Vector component stats}
 \centering
 \tiny
 \begin{tabular}{@{}rrrr@{}}
@@ -427,9 +362,9 @@ $\Delta B_z$ & 79,653 & 104,794 & -323,599 to 634,124 \\
 \bottomrule
 \end{tabular}
 \end{block}
-\begin{block}{Immediate next checks}
+\begin{block}{What's next}
 \scriptsize
-Before handing the system to new operators, replot \code{peak\_01} and \code{acq\_seconds} from CSV outside the live cell, then verify no recurring batch-edge spike is present.
+$\Delta B$ magnitudes are huge — likely the bias hasn't been subtracted yet, or the inversion needs a sanity check against a known applied field. Also want to replot \code{peak\_01} vs \code{acq\_seconds} from the CSV (outside the live cell) to confirm there's no batch-edge timing spike hiding in the data.
 \end{block}
 \end{column}
 \end{columns}

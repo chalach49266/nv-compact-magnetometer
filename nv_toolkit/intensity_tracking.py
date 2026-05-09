@@ -111,12 +111,69 @@ def estimate_parked_series_fields(
     block_indices = np.asarray(block_indices, dtype=int)
     point_in_block = np.asarray(point_in_block, dtype=int)
     parked_freqs_mhz = np.asarray(parked_freqs_mhz, dtype=float)
+    intensities = np.asarray(parked_intensities, dtype=float)
+    timestamps = np.asarray(timestamps_epoch_s, dtype=float)
     rows: list[dict[str, object]] = []
     nv_axes = named_nv_axes(nv_axes_preset)
 
+    # Fast-path (search_radius_mT == 0): vectorize over all timestamps and blocks.
+    # Pre-sort each block's columns once; then the inner body is just arithmetic.
+    if float(search_radius_mT) == 0.0:
+        # Build per-block index arrays (sorted by point_in_block within each block)
+        block_info: list[tuple[int, TwoPointCalibration, np.ndarray, np.ndarray]] = []
+        for block_index, calibration in calibrations.items():
+            mask = block_indices == int(block_index)
+            order = np.argsort(point_in_block[mask])
+            cols = np.flatnonzero(mask)[order]  # indices into the measurement columns
+            if len(cols) != 2:
+                raise ValueError(f"Block {block_index} does not contain exactly two parked values")
+            block_info.append((int(block_index), calibration, cols, parked_freqs_mhz[cols]))
+
+        for row_index, save_id in enumerate(save_ids):
+            spectrum = intensities[row_index]
+            timestamp = float(timestamps[row_index])
+            for block_index, calibration, cols, block_freqs in block_info:
+                s_minus = float(spectrum[cols[0]])
+                s_plus = float(spectrum[cols[1]])
+                # estimate_delta_f_mhz inlined using cached fields
+                d_current = s_plus - s_minus
+                delta_d = d_current - calibration._d_reference  # type: ignore[attr-defined]
+                denom = calibration._denom  # type: ignore[attr-defined]
+                if abs(denom) < 1e-12:
+                    raise ValueError("Calibration slopes are too small for a stable delta_f estimate")
+                delta_f_mhz = delta_d / denom
+                sensitivity = calibration.sensitivity_norm_mhz_per_mT
+                delta_proj_mT = float(delta_f_mhz / sensitivity)
+                axis = calibration.measurement_axis
+                delta_vector_mT = axis * delta_proj_mT
+                rows.append(
+                    {
+                        "save_id": save_id,
+                        "timestamp_epoch_s": timestamp,
+                        "block_index": block_index,
+                        "frequency_minus_mhz": float(block_freqs[0]),
+                        "frequency_plus_mhz": float(block_freqs[1]),
+                        "intensity_minus": s_minus,
+                        "intensity_plus": s_plus,
+                        "delta_B_projection_mT": delta_proj_mT,
+                        "delta_B_projection_uT": delta_proj_mT * 1000.0,
+                        "delta_Bx_uT": float(delta_vector_mT[0] * 1000.0),
+                        "delta_By_uT": float(delta_vector_mT[1] * 1000.0),
+                        "delta_Bz_uT": float(delta_vector_mT[2] * 1000.0),
+                        "measurement_axis_x": float(axis[0]),
+                        "measurement_axis_y": float(axis[1]),
+                        "measurement_axis_z": float(axis[2]),
+                        "sensitivity_norm_mhz_per_mT": sensitivity,
+                        "slope_denom_abs": float(abs(calibration.slope_minus_per_mhz - calibration.slope_plus_per_mhz)),
+                        "transition_index": int(calibration.transition_index),
+                    }
+                )
+        return rows
+
+    # Nonlinear-refinement branch: per-sample loop (search_radius_mT > 0)
     for row_index, save_id in enumerate(save_ids):
-        spectrum = np.asarray(parked_intensities[row_index], dtype=float)
-        timestamp = float(np.asarray(timestamps_epoch_s, dtype=float)[row_index])
+        spectrum = intensities[row_index]
+        timestamp = float(timestamps[row_index])
         for block_index, calibration in calibrations.items():
             mask = block_indices == int(block_index)
             block_values = spectrum[mask]
@@ -175,21 +232,53 @@ def reconstruct_vector_timeseries(
             ordered_ids.append(save_id)
         grouped[save_id].append(row)
 
+    # Cache (WA)† pseudo-inverse per unique block-set so that across a long time
+    # series we run one SVD total instead of one per timestamp.
+    # Key: (sorted block_indices, A-matrix rows as tuples, weight tuple)
+    _pinv_cache: dict[tuple, tuple] = {}
+
+    def _get_or_compute_pinv(
+        rows_for_id: list[dict[str, object]],
+    ) -> tuple[np.ndarray, np.ndarray, int, float]:
+        """Return (A, P, rank, condition_number) where P = (WA)† W."""
+        A = np.asarray(
+            [[float(r["measurement_axis_x"]), float(r["measurement_axis_y"]), float(r["measurement_axis_z"])]
+             for r in rows_for_id],
+            dtype=float,
+        )
+        slope_denoms = np.asarray(
+            [float(r.get("slope_denom_abs", r.get("sensitivity_norm_mhz_per_mT", 1.0))) for r in rows_for_id],
+            dtype=float,
+        )
+        weights = slope_denoms ** 2
+        weights = weights / float(np.max(weights)) if float(np.max(weights)) > 0.0 else np.ones_like(weights)
+
+        cache_key = (
+            tuple(int(r.get("block_index", i)) for i, r in enumerate(rows_for_id)),
+            tuple(A.ravel().tolist()),
+            tuple(weights.tolist()),
+        )
+        cached = _pinv_cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        W = np.diag(weights)
+        WA = W @ A
+        # Compute weighted pseudo-inverse: P such that solution = P @ b
+        # lstsq(WA, W·b) = (WA)† W b, so P = (WA)† W
+        WA_pinv, _, rank, singular_values = np.linalg.lstsq(WA, W, rcond=None)
+        if singular_values.size == 0 or float(np.min(np.abs(singular_values))) == 0.0:
+            condition_number = float("inf")
+        else:
+            condition_number = float(np.max(np.abs(singular_values)) / np.min(np.abs(singular_values)))
+
+        result = (A, WA_pinv, int(rank), condition_number)
+        _pinv_cache[cache_key] = result  # type: ignore[assignment]
+        return result
+
     vector_rows: list[dict[str, object]] = []
     for save_id in ordered_ids:
         rows = grouped[save_id]
-        A = np.asarray(
-            [
-                [
-                    float(row["measurement_axis_x"]),
-                    float(row["measurement_axis_y"]),
-                    float(row["measurement_axis_z"]),
-                ]
-                for row in rows
-            ],
-            dtype=float,
-        )
-        b = np.asarray([float(row["delta_B_projection_mT"]) for row in rows], dtype=float)
         timestamp = float(rows[0]["timestamp_epoch_s"])
         if len(rows) < int(min_channels):
             vector_rows.append(
@@ -208,40 +297,24 @@ def reconstruct_vector_timeseries(
             )
             continue
 
-        # Weight each channel by |slope_minus - slope_plus|² — the actual slope
-        # denominator from the reference spectrum. This is proportional to
-        # contrast, so low-contrast channels (noisy projection estimates) are
-        # automatically downweighted. Falls back to sensitivity_norm if the
-        # slope denominator is not stored (e.g. rows from older code paths).
-        slope_denoms = np.asarray(
-            [float(row.get("slope_denom_abs", row.get("sensitivity_norm_mhz_per_mT", 1.0))) for row in rows],
-            dtype=float,
-        )
-        weights = slope_denoms ** 2
-        weights = weights / float(np.max(weights)) if float(np.max(weights)) > 0.0 else np.ones_like(weights)
-        W = np.diag(weights)
-        WA = W @ A
-        Wb = W @ b
-        solution, _, rank, singular_values = np.linalg.lstsq(WA, Wb, rcond=None)
+        A, P, rank, condition_number = _get_or_compute_pinv(rows)
+        b = np.asarray([float(row["delta_B_projection_mT"]) for row in rows], dtype=float)
+        solution = P @ b
         fitted = A @ solution
         residual_norm_uT = float(np.linalg.norm(fitted - b) * 1000.0)
-        if singular_values.size == 0 or float(np.min(np.abs(singular_values))) == 0.0:
-            condition_number = float("inf")
-        else:
-            condition_number = float(np.max(np.abs(singular_values)) / np.min(np.abs(singular_values)))
 
         vector_rows.append(
             {
                 "save_id": save_id,
                 "timestamp_epoch_s": timestamp,
                 "n_channels": int(len(rows)),
-                "rank": int(rank),
+                "rank": rank,
                 "condition_number": condition_number,
                 "residual_norm_uT": residual_norm_uT,
                 "delta_Bx_uT": float(solution[0] * 1000.0),
                 "delta_By_uT": float(solution[1] * 1000.0),
                 "delta_Bz_uT": float(solution[2] * 1000.0),
-                "status": "ok" if int(rank) >= 3 else "rank_deficient",
+                "status": "ok" if rank >= 3 else "rank_deficient",
             }
         )
     return vector_rows
