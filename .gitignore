@@ -25,6 +25,7 @@ qickdawg_py310/
 # IDE / OS
 .vscode/
 .idea/
+.obsidian/
 .DS_Store
 Thumbs.db
 *.swp

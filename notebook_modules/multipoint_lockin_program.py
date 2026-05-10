@@ -118,8 +118,8 @@ class MultipointLockinODMR(NVAveragerProgram):
             t_ref = self.cfg.readout_integration_treg + self.cfg.relax_delay_treg
 
             # Set MW to off-resonance (reference pulse — no NV excitation).
-            self.mw_frequency_register.set_to(ref_offres_mhz)
-            self.pulse(ch=self.cfg.mw_channel, t=t_ref)
+            self.mw_frequency_register.set_to(ref_offres_mhz) # remove this line may fix the mismatch
+            self.pulse(ch=self.cfg.mw_channel, t=t_ref) # remove this line may fix the mismatch
             self.trigger(
                 adcs=self.cfg.adcs,
                 pins=[self.cfg.laser_gate_pmod],
