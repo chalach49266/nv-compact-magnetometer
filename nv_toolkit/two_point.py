@@ -125,9 +125,19 @@ def estimate_delta_f_mhz(
     signal_minus: float,
     signal_plus: float,
     calibration: TwoPointCalibration,
+    *,
+    subtract_baseline: bool = True,
 ) -> float:
+    # subtract_baseline=True (default) preserves the original behaviour: subtract the
+    # per-block baseline differential captured at calibration time so delta_f reports
+    # the SHIFT relative to that baseline. Set False to skip the subtraction and
+    # observe the raw differential / slope ratio (useful for experiments comparing
+    # whether the baseline term contributes meaningful information).
     d_current = float(signal_plus) - float(signal_minus)
-    delta_d = d_current - calibration._d_reference  # type: ignore[attr-defined]
+    if subtract_baseline:
+        delta_d = d_current - calibration._d_reference  # type: ignore[attr-defined]
+    else:
+        delta_d = d_current
     denom = calibration._denom  # type: ignore[attr-defined]
     if abs(denom) < 1e-12:
         raise ValueError("Calibration slopes are too small for a stable delta_f estimate")

@@ -107,6 +107,7 @@ def estimate_parked_series_fields(
     hyperfine_splitting_mhz: float | None = 2.16,
     nv_axes_preset: str = "qdm",
     search_radius_mT: float = 0.0,
+    subtract_baseline: bool = True,
 ) -> list[dict[str, object]]:
     block_indices = np.asarray(block_indices, dtype=int)
     point_in_block = np.asarray(point_in_block, dtype=int)
@@ -135,9 +136,14 @@ def estimate_parked_series_fields(
             for block_index, calibration, cols, block_freqs in block_info:
                 s_minus = float(spectrum[cols[0]])
                 s_plus = float(spectrum[cols[1]])
-                # estimate_delta_f_mhz inlined using cached fields
+                # estimate_delta_f_mhz inlined using cached fields. The
+                # subtract_baseline kwarg gates the per-block baseline differential
+                # subtraction; default True preserves the original behaviour.
                 d_current = s_plus - s_minus
-                delta_d = d_current - calibration._d_reference  # type: ignore[attr-defined]
+                if subtract_baseline:
+                    delta_d = d_current - calibration._d_reference  # type: ignore[attr-defined]
+                else:
+                    delta_d = d_current
                 denom = calibration._denom  # type: ignore[attr-defined]
                 if abs(denom) < 1e-12:
                     raise ValueError("Calibration slopes are too small for a stable delta_f estimate")
