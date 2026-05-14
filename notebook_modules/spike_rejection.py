@@ -112,8 +112,10 @@ class HampelDespiker:
                     flags[k] = True
                     replaced = True
 
-            if not replaced:
-                buf.append(float(clean[k]))
+            #if not replaced:
+                #buf.append(float(clean[k]))
+
+            buf.append(float(x[k]))     # always push the RAW sample
 
         self._count += 1
         return clean, flags
