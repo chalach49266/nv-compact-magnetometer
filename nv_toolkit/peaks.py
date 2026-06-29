@@ -519,8 +519,12 @@ def fit_local_dips(
         contrast0 = max(float(baseline0 - local_values[nearest_idx]), 1e-5)
         linewidth0 = _estimate_local_fwhm_mhz(local_freqs, local_values, win)
 
+        # Contrast upper bound scales with the local signal span so the larger
+        # homodyne contrast does not pin the fit (and so x0 stays feasible for trf).
+        contrast_upper = max(1.0, 2.0 * float(np.max(local_values) - np.min(local_values)))
+        contrast0 = min(contrast0, contrast_upper)
         lower = [center_guess - win, 0.2, 0.0, float(np.min(local_values) - 0.05)]
-        upper = [center_guess + win, 29.0, 1.0, float(np.max(local_values) + 0.05)]
+        upper = [center_guess + win, 29.0, contrast_upper, float(np.max(local_values) + 0.05)]
         x0 = [center0, linewidth0, contrast0, baseline0]
         if model_name == "pseudo_voigt":
             x0.append(0.5)
