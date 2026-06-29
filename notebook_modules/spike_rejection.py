@@ -37,6 +37,8 @@ class HampelDespiker:
     min_warmup: int = 5
     baseline: Optional[np.ndarray] = None
     warmup_k_sigma: float = 6.0
+    sigma_cap: float = 2.5
+    
     # Lower bound on the MAD-derived sigma estimate. With small windows the
     # MAD can transiently shrink to zero (e.g. when consecutive samples
     # happen to collide on integer ADC counts), so we floor it. The right
@@ -101,6 +103,7 @@ class HampelDespiker:
                 med = float(np.median(arr))
                 mad = float(np.median(np.abs(arr - med)))
                 sigma = max(_MAD_SCALE * mad, self.sigma_floor)
+                sigma = min(sigma, self.sigma_cap) # New line for sigma_cap
                 if sigma > 0.0 and abs(clean[k] - med) > self.k_sigma * sigma:
                     clean[k] = med
                     flags[k] = True

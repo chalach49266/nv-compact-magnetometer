@@ -1,0 +1,44 @@
+\documentclass[aspectratio=169,10pt]{beamer}
+
+\usetheme{default}
+\setbeamertemplate{navigation symbols}{}
+\setbeamersize{text margin left=0.45cm,text margin right=0.45cm}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{graphicx}
+
+\setbeamercolor{normal text}{fg=black,bg=white}
+\setbeamercolor{frametitle}{fg=black,bg=white}
+\setbeamerfont{frametitle}{series=\bfseries,size=\large}
+\setbeamertemplate{footline}{%
+  \hfill{\scriptsize Standard deviation vs repeated measurements \insertframenumber/\inserttotalframenumber}\hspace{0.6em}\vspace{0.30em}
+}
+
+\newcommand{\assetdir}{assets/shot_noise_limit_simple}
+\newcommand{\plotfit}[1]{\includegraphics[width=\linewidth,height=0.84\textheight,keepaspectratio]{\assetdir/#1}}
+
+\title{Shot-Noise Limit Experiment}
+\subtitle{Standard deviation vs repeated measurements}
+\author{Chalach Kasemtantikul}
+\date{June 17, 2026}
+
+\begin{document}
+
+\begin{frame}{ADC channel standard deviation}
+\centering
+\plotfit{adc_std_vs_repetitions.png}
+\end{frame}
+
+\begin{frame}{Frequency-shift standard deviation}
+\centering
+\plotfit{frequency_shift_std_vs_repetitions.png}
+\end{frame}
+
+\begin{frame}{Magnetic-field standard deviation}
+\centering
+\plotfit{magnetic_field_std_vs_repetitions.png}
+\end{frame}
+
+\end{document}

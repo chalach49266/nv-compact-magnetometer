@@ -92,11 +92,12 @@ def _prepare_state(
     parked_format: str,
     input_format: str,
     poll_interval: float,
+    placement: str = "auto",
 ) -> PreparedState:
     full_scan_path = Path(full_scan).expanduser().resolve()
     parked_data_path = Path(parked_data).expanduser().resolve()
     freqs_mhz, measured, transition_centers = _load_operator_full_scan(full_scan_path, input_format)
-    parked_plan = _suggest_parked_frequencies(freqs_mhz, measured, transition_centers)
+    parked_plan = _suggest_parked_frequencies(freqs_mhz, measured, transition_centers, placement=placement)
     try:
         estimated_bias_mT = _estimate_bias_field_mT(freqs_mhz, measured, transition_centers)
     except Exception:

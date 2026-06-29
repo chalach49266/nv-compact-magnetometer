@@ -1,0 +1,31 @@
+index	asset	markdown_alt	source
+1	01_mw_off_reference.png	OOMA: MW Off (referesce)	Attachments/5EFC5962-BA50-4011-9D49-0296325AD9FB.png
+2	02_odmr_detected_centers.png	Pasted Graphic 27.png	Attachments/0ECD38B5-3804-43E0-9426-62D298AB1676.png
+3	03_parked_frequencies.png	• rejected fitted center:	Attachments/21E0BD94-CB37-43FF-9528-F46C532ABCE5.png
+4	04_run1_lockin_error.png	Live two-point lock-in error signal - multipoint lockin live 202605.8 34709.csvl	Attachments/46F6A92F-8494-4F4F-908C-BAD78B2F3EDD.png
+5	05_run1_live_parked_traces.png	Pasted Graphic 30.png	Attachments/E7CEA2BB-BE48-4A40-8E68-C4F2E7FE7412.png
+6	06_run1_inferred_peak_frequency.png	Pasted Graphic 32.png	Attachments/D08124EF-8F7D-47EA-9A84-95332732AF77.png
+7	07_run1_b_components.png	8 feld vectoe reconctruction -. multipoint lackin live 20260518 134799 csl	Attachments/2F8EACD4-4901-47FB-A0FB-8A25EAAAB578.png
+8	08_run1_b_total.png	Total B feld shit magnitude over time	Attachments/94F04CCA-1F8C-4019-9F24-765BEE6E38E0.png
+9	09_run2_lockin_error.png	Pasted Graphic 35.png	Attachments/D037DD55-4B09-4A26-804D-A9CC7AB38A21.png
+10	10_run2_live_parked_traces.png	Pasted Graphic 36.png	Attachments/7BF5D16C-DD98-49A2-B379-22B35F2E9F86.png
+11	11_run2_inferred_peak_frequency.png	Inferred new peak thequency per block - Sue nur	Attachments/93B19BF3-D8DC-4E15-A15F-54D90EC681E8.png
+12	12_run2_b_components.png	Pasted Graphic 38.png	Attachments/8196E994-3AD9-4A8D-AD5A-839CD88DA078.png
+13	13_run2_b_total.png	Total B heid shit magstude over sind	Attachments/82EC341C-8289-47EF-B008-917193E3B8F5.png
+14	14_run3_lockin_error.png	Live two-point lock-in error signal - multipoint lockin live 20260518 35256.csv	Attachments/CCA79541-5963-40F7-8895-8E128CFDF57A.png
+15	15_run3_live_parked_traces.png	Pasted Graphic 41.png	Attachments/675F122A-6FEE-4240-B586-9E26025708D8.png
+16	16_run3_inferred_peak_frequency.png	Pasted Graphic 42.png	Attachments/375608ED-3A8D-4259-865B-A5722375DB4F.png
+17	17_run3_b_components.png	Pasted Graphic 43.png	Attachments/FAF02A42-7840-4145-BDF0-D449E5C0E75A.png
+18	18_run3_b_total.png	Ital B feld shit magnitude over tine	Attachments/871F1AAF-739E-4F88-82F2-3E685A4638BF.png
+19	19_live_b_small_magnet.png	Pasted Graphic 45.png	Attachments/3E3C47A3-F881-4408-BBCF-27CB6CF35DFF.png
+20	20_live_b_medium_magnet.png	Live reconstructed 28- malipoint, lockin_ live. 8.20260518,135632.csv	Attachments/8C4B2FED-B52F-416F-8365-53B8F0408DA0.png
+21	21_medium_x_lockin_error.png	Live two-point lock-in error signal - muttipain: lockin In 20260518 35924 csv	Attachments/4C434843-D774-41C2-BB6C-5459259E76BF.png
+22	22_medium_x_live_parked_traces.png	Pasted Graphic 48.png	Attachments/DE2D0107-B0B3-4510-B490-50762BE4004D.png
+23	23_medium_x_inferred_peak_frequency.png	hered new pesk frequency per block — live run	Attachments/36EC8E0F-369F-475A-A2C6-2F8757053277.png
+24	24_medium_x_b_components.png	Pasted Graphic 50.png	Attachments/C04A3697-8C13-44AD-ADE6-ACF0273C5A87.png
+25	25_medium_x_b_total.png	Total B held shit magnitude over time	Attachments/1D72D146-CF5B-4CEE-B243-0767F2E1AA7A.png
+26	26_medium_y_lockin_error.png	Live two-point lock-in error signal - multipoint lockin live 202605.8 14014csv	Attachments/0C640F8B-737F-4A59-AB12-CD7DB6666A47.png
+27	27_medium_y_live_parked_traces.png	Pasted Graphic 53.png	Attachments/FC61702F-2042-44DC-888E-E0B13E3CAD29.png
+28	28_medium_y_inferred_peak_frequency.png	afered new peak frequency per block - Rue run	Attachments/339FAB20-4976-4DC4-8E6F-0FE1AC20F09C.png
+29	29_medium_y_b_components.png	Pasted Graphic 55.png	Attachments/62851BD4-72AE-47D9-BD23-9C92818AD17B.png
+30	30_medium_y_b_total.png	Total B feld shit magnitude over sind	Attachments/97BD8F1C-B9C4-45E9-A2E1-15E60B0DDF94.png

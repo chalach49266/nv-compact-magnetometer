@@ -172,7 +172,12 @@ def _cmd_plan(args: argparse.Namespace) -> int:
     full_scan = args.full_scan.expanduser().resolve()
     output_plan = args.output.expanduser().resolve()
     freqs_mhz, measured, transition_centers = _load_operator_full_scan(full_scan, args.input_format)
-    plan = _suggest_parked_frequencies(freqs_mhz, measured, transition_centers)
+    plan = _suggest_parked_frequencies(
+        freqs_mhz,
+        measured,
+        transition_centers,
+        placement=args.placement,
+    )
     bias_mT = _estimate_bias_with_fallback(full_scan, freqs_mhz, measured, transition_centers)
 
     _write_parked_plan_csv(output_plan, plan)
@@ -247,6 +252,12 @@ def _build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--output", type=Path, required=True, help="Output parked-frequency plan CSV.")
     plan_parser.add_argument("--input-format", choices=("auto", "raw", "toolkit"), default="auto")
     plan_parser.add_argument("--summary", type=Path, default=None, help="Optional one-row summary CSV with estimated bias.")
+    plan_parser.add_argument(
+        "--placement",
+        choices=("auto", "empirical_half_max", "empirical", "max_slope", "half_max"),
+        default="auto",
+        help="Lock-in parking placement: auto (default, contrast-based hybrid), empirical_half_max, empirical, max_slope, or half_max.",
+    )
     plan_parser.set_defaults(func=_cmd_plan)
 
     reconstruct_parser = subparsers.add_parser(

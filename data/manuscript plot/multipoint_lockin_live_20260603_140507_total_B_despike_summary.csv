@@ -1,0 +1,2 @@
+row_index,position,timestamp_epoch_s,magnitude_before_uT,delta_Bx_uT_before,delta_Bx_uT_after,delta_By_uT_before,delta_By_uT_after,delta_Bz_uT_before,delta_Bz_uT_after,magnitude_after_uT,median_window_samples
+38,38,3.0027291253209114,26.66907837395448,15.643087564554875,4.693584980961383,-19.614424183211447,0.8816573549213355,9.044772895150276,2.932064177283572,5.603932548193521,21

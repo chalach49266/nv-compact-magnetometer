@@ -1,0 +1,365 @@
+\documentclass[aspectratio=169,10pt]{beamer}
+
+\usetheme{default}
+\setbeamertemplate{navigation symbols}{}
+\setbeamersize{text margin left=0.65cm,text margin right=0.65cm}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{amsmath}
+\usepackage{url}
+
+\setbeamercolor{normal text}{fg=black,bg=white}
+\setbeamercolor{frametitle}{fg=black,bg=white}
+\setbeamerfont{frametitle}{series=\bfseries,size=\Large}
+\setbeamertemplate{itemize item}{--}
+\setbeamertemplate{itemize subitem}{--}
+\setbeamertemplate{footline}{%
+  \hfill{\scriptsize Compact magnetometer update \insertframenumber/\inserttotalframenumber}\hspace{0.6em}\vspace{0.35em}
+}
+
+\newcommand{\assetdir}{assets/project_update_20260518}
+\newcommand{\smallitemsep}{\setlength{\itemsep}{0.45em}}
+\newcommand{\figfit}[1]{\includegraphics[width=\linewidth,height=0.82\textheight,keepaspectratio]{\assetdir/#1}}
+\newcommand{\figwide}[1]{\includegraphics[width=\linewidth,height=0.36\textheight,keepaspectratio]{\assetdir/#1}}
+
+\title{Compact Magnetometer Project Update}
+\subtitle{Fixed magnet, new spot data}
+\author{Chalach Kasemtantikul}
+\date{May 18, 2026}
+
+\begin{document}
+
+\begin{frame}{Compact magnetometer project update}
+\begin{columns}[T,totalwidth=\textwidth]
+\begin{column}{0.56\textwidth}
+\begin{itemize}\smallitemsep
+  \item New May 18 data: fixed magnet measured at a new spot with the updated live lock-in workflow.
+  \item The workflow is still:
+  \[
+  \begin{aligned}
+  \text{ODMR sweep} &\rightarrow \text{16 parked frequencies} \\
+  &\rightarrow \Delta f(t) \rightarrow \Delta B(t).
+  \end{aligned}
+  \]
+  \item The same Hampel-based spike rejection is used before frequency-shift and B-field reconstruction.
+  \item Latest May 18 reconstruction uses 8 kept transitions and 16 parked frequencies.
+  \item The B reconstruction matrix condition number is 6.65 for the May 18 parked-frequency plan.
+  \item This deck includes all 30 figures from the new fixed-magnet attachment set.
+\end{itemize}
+\end{column}
+\begin{column}{0.40\textwidth}
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+Item & May 18 result \\
+\midrule
+Transitions & 8 \\
+Parked points & 16 \\
+B matrix cond. & 6.65 \\
+Offline lock-in rate & 11.3--12.4 Hz \\
+Live B-field rate & 6.4--6.7 Hz \\
+New figures & 30 \\
+\bottomrule
+\end{tabular}
+
+\vspace{1.0em}
+\scriptsize
+Live lock-in runs in this update:
+
+\vspace{0.15em}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Run & Batches & Time & Rate \\
+\midrule
+First & 319 & 26.2 s & 12.2 Hz \\
+Second & 382 & 33.8 s & 11.3 Hz \\
+Third & 352 & 30.5 s & 11.5 Hz \\
+Medium X & 422 & 34.0 s & 12.4 Hz \\
+Medium Y & 369 & 30.7 s & 12.0 Hz \\
+\bottomrule
+\end{tabular}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Updated B-field statistics}
+\centering
+\scriptsize
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+Data set & Rate & Mean $B_x$ & Mean $B_y$ & Mean $B_z$ & Mean $|B|$ & Std. $|B|$ \\
+\midrule
+First run & 12.2 Hz & -7.79 & 5.71 & 6.24 & 13.08 & 4.62 \\
+Second run & 11.3 Hz & -8.04 & 6.19 & 6.11 & 12.75 & 3.75 \\
+Third run & 11.5 Hz & -7.98 & 6.12 & 5.88 & 12.70 & 3.85 \\
+Medium X run & 12.4 Hz & -9.37 & 5.83 & 5.74 & 14.48 & 4.94 \\
+Medium Y run & 12.0 Hz & -6.13 & 6.24 & 4.38 & 14.14 & 5.86 \\
+Live B small magnet & 6.7 Hz & -8.02 & 7.33 & 6.71 & 15.96 & 8.79 \\
+Live B medium magnet & 6.7 Hz & -7.26 & 8.59 & 6.26 & 19.26 & 13.64 \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.7em}
+\footnotesize
+Units for B values are $\mu$T. All May 18 offline reconstruction samples were rank-ok, and the B matrix condition number was 6.65.
+\end{frame}
+
+\begin{frame}{Workflow calibration: ODMR and parked frequencies}
+\begin{columns}[T,totalwidth=\textwidth]
+\begin{column}{0.34\textwidth}
+\centering
+\includegraphics[width=\linewidth,height=0.77\textheight,keepaspectratio]{\assetdir/01_mw_off_reference.png}
+\end{column}
+\begin{column}{0.63\textwidth}
+\centering
+\includegraphics[width=\linewidth,height=0.36\textheight,keepaspectratio]{\assetdir/02_odmr_detected_centers.png}
+
+\vspace{0.4em}
+\includegraphics[width=\linewidth,height=0.38\textheight,keepaspectratio]{\assetdir/03_parked_frequencies.png}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{First run: lock-in and B reconstruction}
+\centering
+\includegraphics[width=\linewidth,height=0.29\textheight,keepaspectratio]{\assetdir/04_run1_lockin_error.png}
+
+\vspace{0.25em}
+\begin{columns}[T,totalwidth=\textwidth]
+\begin{column}{0.58\textwidth}
+\centering
+\includegraphics[width=\linewidth,height=0.45\textheight,keepaspectratio]{\assetdir/07_run1_b_components.png}
+\end{column}
+\begin{column}{0.39\textwidth}
+\centering
+\includegraphics[width=\linewidth,height=0.28\textheight,keepaspectratio]{\assetdir/08_run1_b_total.png}
+
+\vspace{0.3em}
+\scriptsize
+\begin{tabular}{@{}lr@{}}
+\toprule
+Metric & Value \\
+\midrule
+Batches & 319 \\
+Duration & 26.2 s \\
+Rate & 12.2 Hz \\
+Mean $|B|$ & 13.08 $\mu$T \\
+\bottomrule
+\end{tabular}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{First run: live parked traces}
+\centering
+\figfit{05_run1_live_parked_traces.png}
+\end{frame}
+
+\begin{frame}{First run: inferred peak frequencies}
+\centering
+\figfit{06_run1_inferred_peak_frequency.png}
+\end{frame}
+
+\begin{frame}{Second run: lock-in and B reconstruction}
+\centering
+\includegraphics[width=\linewidth,height=0.29\textheight,keepaspectratio]{\assetdir/09_run2_lockin_error.png}
+
+\vspace{0.25em}
+\begin{columns}[T,totalwidth=\textwidth]
+\begin{column}{0.58\textwidth}
+\centering
+\includegraphics[width=\linewidth,height=0.45\textheight,keepaspectratio]{\assetdir/12_run2_b_components.png}
+\end{column}
+\begin{column}{0.39\textwidth}
+\centering
+\includegraphics[width=\linewidth,height=0.28\textheight,keepaspectratio]{\assetdir/13_run2_b_total.png}
+
+\vspace{0.3em}
+\scriptsize
+\begin{tabular}{@{}lr@{}}
+\toprule
+Metric & Value \\
+\midrule
+Batches & 382 \\
+Duration & 33.8 s \\
+Rate & 11.3 Hz \\
+Mean $|B|$ & 12.75 $\mu$T \\
+\bottomrule
+\end{tabular}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Second run: live parked traces}
+\centering
+\figfit{10_run2_live_parked_traces.png}
+\end{frame}
+
+\begin{frame}{Second run: inferred peak frequencies}
+\centering
+\figfit{11_run2_inferred_peak_frequency.png}
+\end{frame}
+
+\begin{frame}{Third run: lock-in and B reconstruction}
+\centering
+\includegraphics[width=\linewidth,height=0.29\textheight,keepaspectratio]{\assetdir/14_run3_lockin_error.png}
+
+\vspace{0.25em}
+\begin{columns}[T,totalwidth=\textwidth]
+\begin{column}{0.58\textwidth}
+\centering
+\includegraphics[width=\linewidth,height=0.45\textheight,keepaspectratio]{\assetdir/17_run3_b_components.png}
+\end{column}
+\begin{column}{0.39\textwidth}
+\centering
+\includegraphics[width=\linewidth,height=0.28\textheight,keepaspectratio]{\assetdir/18_run3_b_total.png}
+
+\vspace{0.3em}
+\scriptsize
+\begin{tabular}{@{}lr@{}}
+\toprule
+Metric & Value \\
+\midrule
+Batches & 352 \\
+Duration & 30.5 s \\
+Rate & 11.5 Hz \\
+Mean $|B|$ & 12.70 $\mu$T \\
+\bottomrule
+\end{tabular}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Third run: live parked traces}
+\centering
+\figfit{15_run3_live_parked_traces.png}
+\end{frame}
+
+\begin{frame}{Third run: inferred peak frequencies}
+\centering
+\figfit{16_run3_inferred_peak_frequency.png}
+\end{frame}
+
+\begin{frame}{Live B tests: small and medium magnets}
+\begin{columns}[T,totalwidth=\textwidth]
+\begin{column}{0.49\textwidth}
+\centering
+\includegraphics[width=\linewidth,height=0.64\textheight,keepaspectratio]{\assetdir/19_live_b_small_magnet.png}
+
+\scriptsize Small magnet: 403 batches over 60.0 s, 6.7 Hz.
+\end{column}
+\begin{column}{0.49\textwidth}
+\centering
+\includegraphics[width=\linewidth,height=0.64\textheight,keepaspectratio]{\assetdir/20_live_b_medium_magnet.png}
+
+\scriptsize Medium magnet: 402 batches over 60.1 s, 6.7 Hz.
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Medium magnet on X: lock-in and B reconstruction}
+\centering
+\includegraphics[width=\linewidth,height=0.29\textheight,keepaspectratio]{\assetdir/21_medium_x_lockin_error.png}
+
+\vspace{0.25em}
+\begin{columns}[T,totalwidth=\textwidth]
+\begin{column}{0.58\textwidth}
+\centering
+\includegraphics[width=\linewidth,height=0.45\textheight,keepaspectratio]{\assetdir/24_medium_x_b_components.png}
+\end{column}
+\begin{column}{0.39\textwidth}
+\centering
+\includegraphics[width=\linewidth,height=0.28\textheight,keepaspectratio]{\assetdir/25_medium_x_b_total.png}
+
+\vspace{0.3em}
+\scriptsize
+\begin{tabular}{@{}lr@{}}
+\toprule
+Metric & Value \\
+\midrule
+Batches & 422 \\
+Duration & 34.0 s \\
+Rate & 12.4 Hz \\
+Mean $|B|$ & 14.48 $\mu$T \\
+\bottomrule
+\end{tabular}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Medium magnet on X: live parked traces}
+\centering
+\figfit{22_medium_x_live_parked_traces.png}
+\end{frame}
+
+\begin{frame}{Medium magnet on X: inferred peak frequencies}
+\centering
+\figfit{23_medium_x_inferred_peak_frequency.png}
+\end{frame}
+
+\begin{frame}{Medium magnet on Y: lock-in and B reconstruction}
+\centering
+\includegraphics[width=\linewidth,height=0.29\textheight,keepaspectratio]{\assetdir/26_medium_y_lockin_error.png}
+
+\vspace{0.25em}
+\begin{columns}[T,totalwidth=\textwidth]
+\begin{column}{0.58\textwidth}
+\centering
+\includegraphics[width=\linewidth,height=0.45\textheight,keepaspectratio]{\assetdir/29_medium_y_b_components.png}
+\end{column}
+\begin{column}{0.39\textwidth}
+\centering
+\includegraphics[width=\linewidth,height=0.28\textheight,keepaspectratio]{\assetdir/30_medium_y_b_total.png}
+
+\vspace{0.3em}
+\scriptsize
+\begin{tabular}{@{}lr@{}}
+\toprule
+Metric & Value \\
+\midrule
+Batches & 369 \\
+Duration & 30.7 s \\
+Rate & 12.0 Hz \\
+Mean $|B|$ & 14.14 $\mu$T \\
+\bottomrule
+\end{tabular}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Medium magnet on Y: live parked traces}
+\centering
+\figfit{27_medium_y_live_parked_traces.png}
+\end{frame}
+
+\begin{frame}{Medium magnet on Y: inferred peak frequencies}
+\centering
+\figfit{28_medium_y_inferred_peak_frequency.png}
+\end{frame}
+
+\begin{frame}{Next steps}
+\begin{columns}[T,totalwidth=\textwidth]
+\begin{column}{0.50\textwidth}
+\begin{itemize}\smallitemsep
+  \item Continue tuning the Hampel filter parameters for live lock-in spike rejection.
+  \item Verify the B-field reconstruction against controlled field directions and known magnet placements.
+  \item Make live B reconstruction faster so sensitivity does not drop from the calculation time.
+  \item Add dual-channel measurement.
+\end{itemize}
+\end{column}
+\begin{column}{0.46\textwidth}
+\begin{itemize}\smallitemsep
+  \item Reduce crosstalk and stray pickup with RF shielding around the soldered region.
+  \item Continue hardware optimization for compact operation.
+  \item Run the next fabrication dose test after cleaning the old chips.
+  \item Longer-term: integrate nanodiamond on-chip and test simple coupling to a SiN microring resonator.
+\end{itemize}
+\end{column}
+\end{columns}
+\end{frame}
+
+\end{document}

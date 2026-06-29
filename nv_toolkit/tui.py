@@ -20,8 +20,8 @@ from .cli import _detect_transition_centers, _load_reconstruction_input, _parse_
 from .fitting import rank_spectrum_field_candidates
 from .intensity_tracking import build_blockwise_calibrations, estimate_parked_series_fields, reconstruct_vector_timeseries
 from .io import ParkedFrequencySeries, load_spectrum_csv
-from .peaks import _estimate_local_fwhm_mhz, fit_local_dips
-from .peaks import cluster_dip_candidates, collapse_candidate_clusters, detect_baseline_corrected_dip_candidates
+from .peaks import fit_local_dips
+from .peaks import cluster_dip_candidates, collapse_candidate_clusters, detect_baseline_corrected_dip_candidates, reject_unpaired_peaks
 
 
 REPO_DIR = Path(__file__).resolve().parents[1]
@@ -528,31 +528,21 @@ def _load_operator_full_scan(path: Path, input_format: str) -> tuple[np.ndarray,
                 freqs = np.asarray(raw_columns[RAW_FREQUENCY_COLUMN], dtype=float)
                 mw_on = np.asarray(raw_columns[RAW_MW_ON_COLUMN], dtype=float)
                 measured = mw_on / float(np.median(mw_on))
+                # Direct port of the phase1 compute_parking_simple pipeline.
                 candidates = detect_baseline_corrected_dip_candidates(
-                    freqs,
-                    mw_on,
-                    baseline_window_mhz=101.0,
-                    smooth_window_mhz=7.0,
-                    min_prominence_sigma=1.5,
-                    min_width_mhz=1.5,
-                    max_width_mhz=24.0,
-                    min_distance_mhz=2.0,
-                    max_dips=16,
-                    local_fit_window_mhz=8.0,
+                    freqs, mw_on, min_prominence_sigma=1.0,
                 )
-                clusters = cluster_dip_candidates(candidates, merge_distance_mhz=4.0)
-                centers, cluster_rows = collapse_candidate_clusters(clusters, max_centers=8)
-                if len(centers) % 2 != 0 and cluster_rows:
-                    drop_index = min(
-                        range(len(cluster_rows)),
-                        key=lambda idx: (
-                            float(cluster_rows[idx]["mean_confidence"]),
-                            abs(float(cluster_rows[idx]["collapsed_center_mhz"]) - 2870.0),
-                        ),
-                    )
-                    cluster_rows.pop(drop_index)
-                    centers = np.asarray([float(row["collapsed_center_mhz"]) for row in cluster_rows], dtype=float)
-                return freqs, measured, np.sort(np.asarray(centers, dtype=float))
+                clusters = cluster_dip_candidates(candidates, merge_distance_mhz=3.0)
+                centers, _ = collapse_candidate_clusters(clusters, max_centers=8)
+                sweep = (float(freqs.min()), float(freqs.max()))
+                candidate_fits = fit_local_dips(
+                    freqs, measured, centers,
+                    window_mhz=8.0, model="lorentzian", hyperfine_merge_mhz=0.0,
+                )
+                kept_fits, _ = reject_unpaired_peaks(candidate_fits, sweep)
+                kept_fits = sorted(kept_fits, key=lambda f: f.center_mhz)
+                centers = np.asarray([f.center_mhz for f in kept_fits], dtype=float)
+                return freqs, measured, centers
         except Exception:
             if input_format == "raw":
                 raise
@@ -562,18 +552,48 @@ def _load_operator_full_scan(path: Path, input_format: str) -> tuple[np.ndarray,
             batch = load_spectrum_csv(path)
             freqs = np.asarray(batch.freqs_mhz, dtype=float)
             measured = np.asarray(batch.spectra[0], dtype=float)
-            centers = _detect_transition_centers(
-                freqs,
-                measured,
-                measured,
-                "normalized",
-                max_dips=8,
-                min_dips=2,
-                min_distance_mhz=3.0,
+
+            # Direct port of phase1 compute_parking_apr17: detect all sub-peaks,
+            # pair into doublets (gap 1.5–5 MHz), return 8 doublet midpoints.
+            candidates = detect_baseline_corrected_dip_candidates(
+                freqs, measured,
+                min_prominence_sigma=1.5,
+                baseline_window_mhz=12.0,
+                smooth_window_mhz=1.5,
+                min_width_mhz=0.4,
+                max_width_mhz=8.0,
+                min_distance_mhz=2.0,
+                max_dips=None,
             )
-            return freqs, measured, np.asarray(centers, dtype=float)
+            clusters = cluster_dip_candidates(candidates, merge_distance_mhz=1.5)
+            sub_centers, _ = collapse_candidate_clusters(clusters, max_centers=None)
+            sub_fits = fit_local_dips(
+                freqs, measured, sub_centers,
+                window_mhz=6.0, model="lorentzian", hyperfine_merge_mhz=0.0,
+            )
+            sub_fits = sorted(sub_fits, key=lambda f: f.center_mhz)
+
+            used = [False] * len(sub_fits)
+            midpoints: list[float] = []
+            for i, fl in enumerate(sub_fits):
+                if used[i]:
+                    continue
+                best_j, best_gap = None, np.inf
+                for j, fr in enumerate(sub_fits):
+                    if j <= i or used[j]:
+                        continue
+                    gap = fr.center_mhz - fl.center_mhz
+                    if 1.5 <= gap <= 5.0 and gap < best_gap:
+                        best_gap, best_j = gap, j
+                if best_j is not None:
+                    used[i] = used[best_j] = True
+                    midpoints.append(0.5 * (fl.center_mhz + sub_fits[best_j].center_mhz))
+
+            if len(midpoints) == 8:
+                return freqs, measured, np.sort(np.asarray(midpoints, dtype=float))
         except Exception:
-            pass
+            if input_format == "toolkit":
+                raise
 
     parser = _build_reconstruct_parser()
     args = parser.parse_args(
@@ -641,53 +661,330 @@ def _estimate_bias_field_mT(freqs_mhz: np.ndarray, measured: np.ndarray, transit
     return np.asarray(summary.best["B_total_mT"], dtype=float)
 
 
+_FWHM_FLOOR_MHZ = 0.200
+_FWHM_FALLBACK_MHZ = 0.500
+
+
+def _safe_fwhm(fwhm: float) -> float:
+    """Return fwhm, replacing pathologically narrow values with a fixed fallback."""
+    return float(fwhm) if float(fwhm) > _FWHM_FLOOR_MHZ + 0.01 else _FWHM_FALLBACK_MHZ
+
+
+_PLACEMENT_HALF_MAX = "half_max"
+_PLACEMENT_MAX_SLOPE = "max_slope"
+_PLACEMENT_EMPIRICAL = "empirical"
+_PLACEMENT_EMPIRICAL_HALF_MAX = "empirical_half_max"
+_PLACEMENT_AUTO = "auto"
+# Analytical inflection-point factors (used by half_max and max_slope):
+#   Gaussian:   center ± FWHM/(2√(2 ln 2)) ≈ 0.4247 · FWHM
+#   Half-max:   center ± FWHM/2            = 0.5000 · FWHM
+import math as _math
+_PLACEMENT_FACTORS = {
+    _PLACEMENT_HALF_MAX: 0.5,
+    _PLACEMENT_MAX_SLOPE: 1.0 / (2.0 * _math.sqrt(2.0 * _math.log(2.0))),  # ≈ 0.4247 Gaussian
+}
+_WEAK_CONTRAST_FOR_FIT_HALF_MAX = 0.008
+
+
+def _crossing(f_arr: np.ndarray, v_arr: np.ndarray, target: float, decreasing: bool) -> float | None:
+    """Linear-interpolation crossing of `target` in a monotone segment."""
+    for i in range(len(v_arr) - 1):
+        a, b = float(v_arr[i]), float(v_arr[i + 1])
+        if decreasing and a >= target >= b:
+            t = (target - a) / (b - a)
+            return float(f_arr[i]) + t * (float(f_arr[i + 1]) - float(f_arr[i]))
+        if not decreasing and a <= target <= b:
+            t = (target - a) / (b - a)
+            return float(f_arr[i]) + t * (float(f_arr[i + 1]) - float(f_arr[i]))
+    return None
+
+
+def _local_linear_slope(freqs: np.ndarray, values: np.ndarray, f_center: float, half_width: float) -> float:
+    """Slope (PL/MHz) from linear fit to raw data in f_center ± half_width."""
+    mask = (freqs >= f_center - half_width) & (freqs <= f_center + half_width)
+    f_loc, v_loc = freqs[mask], values[mask]
+    if len(f_loc) < 2:
+        return 0.0
+    return float(np.polyfit(f_loc, v_loc, 1)[0])
+
+
+def _quadratic_vertex_x(x: np.ndarray, y: np.ndarray, index: int) -> float:
+    """Sub-sample x position of a local extremum from three neighboring samples."""
+    if index <= 0 or index >= len(x) - 1:
+        return float(x[index])
+    x3 = np.asarray(x[index - 1:index + 2], dtype=float)
+    y3 = np.asarray(y[index - 1:index + 2], dtype=float)
+    try:
+        a, b, _ = np.polyfit(x3, y3, 2)
+    except Exception:
+        return float(x[index])
+    if a >= 0.0 or abs(a) < 1e-18:
+        return float(x[index])
+    vertex = float(-b / (2.0 * a))
+    if float(x3[0]) <= vertex <= float(x3[-1]):
+        return vertex
+    return float(x[index])
+
+
+def _target_crossing_range(v_arr: np.ndarray, decreasing: bool) -> tuple[float, float] | None:
+    """ADC target interval reachable by a monotone crossing scan."""
+    if len(v_arr) < 2:
+        return None
+    return float(np.min(v_arr)), float(np.max(v_arr))
+
+
+def _empirical_parking_pair(
+    freqs: np.ndarray,
+    values: np.ndarray,
+    center: float,
+    search_half_window: float,
+    other_peak_centers: Sequence[float] = (),
+    expected_minus_mhz: float | None = None,
+    expected_plus_mhz: float | None = None,
+    target_adc: float | None = None,
+    seed_search_half_width_mhz: float = 1.0,
+    slope_fit_half_width: float = 1.5,
+    smooth_points: int = 5,
+    min_neighbor_clearance_mhz: float = 1.0,
+) -> tuple[float | None, float | None, float, float]:
+    """Empirical max-slope pair corrected to equal ADC count.
+
+    First find continuous-frequency max-slope seeds on each side from a smoothed
+    raw spectrum.  Then choose one reachable ADC target that minimizes the
+    frequency displacement from those seeds, so equal count is enforced without
+    discarding the slope optimum.
+    """
+    from scipy.ndimage import uniform_filter1d
+
+    mask = (freqs >= center - search_half_window) & (freqs <= center + search_half_window)
+    f_loc = freqs[mask]
+    v_loc = values[mask]
+    if len(f_loc) < 6:
+        return None, None, 0.0, 0.0
+
+    left_mask  = f_loc <= center
+    right_mask = f_loc >= center
+    f_l, v_l = f_loc[left_mask],  v_loc[left_mask]
+    f_r, v_r = f_loc[right_mask], v_loc[right_mask]
+
+    if len(f_l) < 3 or len(f_r) < 3:
+        return None, None, 0.0, 0.0
+
+    smooth_size = max(3, int(smooth_points))
+    if smooth_size % 2 == 0:
+        smooth_size += 1
+    if len(v_loc) < smooth_size:
+        smooth_size = len(v_loc) if len(v_loc) % 2 == 1 else len(v_loc) - 1
+        smooth_size = max(3, smooth_size)
+    v_smooth = uniform_filter1d(v_loc.astype(float), size=smooth_size, mode="nearest")
+    grad = np.gradient(v_smooth, f_loc)
+    g_l = grad[left_mask]
+    g_r = grad[right_mask]
+
+    left_seed_mask = np.ones(len(f_l), dtype=bool)
+    right_seed_mask = np.ones(len(f_r), dtype=bool)
+    if expected_minus_mhz is not None:
+        left_seed_mask = np.abs(f_l - float(expected_minus_mhz)) <= float(seed_search_half_width_mhz)
+        if not np.any(left_seed_mask):
+            left_seed_mask = np.ones(len(f_l), dtype=bool)
+    if expected_plus_mhz is not None:
+        right_seed_mask = np.abs(f_r - float(expected_plus_mhz)) <= float(seed_search_half_width_mhz)
+        if not np.any(right_seed_mask):
+            right_seed_mask = np.ones(len(f_r), dtype=bool)
+
+    left_candidates = np.flatnonzero(left_seed_mask)
+    right_candidates = np.flatnonzero(right_seed_mask)
+    left_idx = int(left_candidates[np.argmax(np.abs(g_l[left_seed_mask]))])
+    right_idx = int(right_candidates[np.argmax(np.abs(g_r[right_seed_mask]))])
+    f_db_seed = _quadratic_vertex_x(f_l, np.abs(g_l), left_idx)
+    f_ib_seed = _quadratic_vertex_x(f_r, np.abs(g_r), right_idx)
+    v_db_seed = float(np.interp(f_db_seed, f_l, v_l))
+    v_ib_seed = float(np.interp(f_ib_seed, f_r, v_r))
+    slope_db_seed = _local_linear_slope(freqs, values, f_db_seed, slope_fit_half_width)
+    slope_ib_seed = _local_linear_slope(freqs, values, f_ib_seed, slope_fit_half_width)
+    if abs(slope_db_seed) < 1e-15 or abs(slope_ib_seed) < 1e-15:
+        return None, None, 0.0, 0.0
+
+    left_range = _target_crossing_range(v_l, decreasing=True)
+    right_range = _target_crossing_range(v_r, decreasing=False)
+    if left_range is None or right_range is None:
+        return None, None, 0.0, 0.0
+    target_low = max(left_range[0], right_range[0])
+    target_high = min(left_range[1], right_range[1])
+    if target_low > target_high:
+        return None, None, 0.0, 0.0
+
+    if target_adc is None:
+        w_db = 1.0 / (slope_db_seed * slope_db_seed)
+        w_ib = 1.0 / (slope_ib_seed * slope_ib_seed)
+        target = (w_db * v_db_seed + w_ib * v_ib_seed) / (w_db + w_ib)
+        target = min(target, v_db_seed, v_ib_seed)
+    else:
+        target = float(target_adc)
+    target = float(np.clip(target, target_low, target_high))
+
+    # If a point is close to another fitted peak, scan nearby equal-ADC targets
+    # and choose the one with better clearance while staying near max slope.
+    other_centers = np.asarray([c for c in other_peak_centers if abs(float(c) - center) > 1e-6], dtype=float)
+    if len(other_centers) > 0:
+        candidates = np.linspace(target_low, target_high, 41)
+        best_score = -float("inf")
+        best_target = target
+        max_shift = max(abs(target_high - target_low), 1e-15)
+        for candidate_target in candidates:
+            cand_db = _crossing(f_l, v_l, float(candidate_target), decreasing=True)
+            cand_ib = _crossing(f_r, v_r, float(candidate_target), decreasing=False)
+            if cand_db is None or cand_ib is None:
+                continue
+            clearance = min(
+                float(np.min(np.abs(other_centers - cand_db))),
+                float(np.min(np.abs(other_centers - cand_ib))),
+            )
+            shift_penalty = abs(float(candidate_target) - target) / max_shift
+            clearance_score = min(clearance, min_neighbor_clearance_mhz) / min_neighbor_clearance_mhz
+            score = clearance_score - 0.25 * shift_penalty
+            if score > best_score:
+                best_score = score
+                best_target = float(candidate_target)
+        target = best_target
+
+    f_db = _crossing(f_l, v_l, target, decreasing=True)
+    f_ib = _crossing(f_r, v_r, target, decreasing=False)
+    if f_db is None or f_ib is None:
+        return None, None, 0.0, 0.0
+
+    slope_db = _local_linear_slope(freqs, values, f_db, slope_fit_half_width)
+    slope_ib = _local_linear_slope(freqs, values, f_ib, slope_fit_half_width)
+    return f_db, f_ib, slope_db, slope_ib
+
+
+def _auto_placement_for_fit(contrast: float) -> str:
+    """Choose a robust parked placement from fitted peak strength.
+
+    Weak dips make empirical gradients unstable and their raw equal-ADC crossing
+    can overfit sweep noise.  For those, use the fit-derived half-width to keep
+    range.  Stronger dips can afford the empirical half-height equal-ADC
+    correction.
+    """
+    if float(contrast) < _WEAK_CONTRAST_FOR_FIT_HALF_MAX:
+        return _PLACEMENT_HALF_MAX
+    return _PLACEMENT_EMPIRICAL_HALF_MAX
+
+
 def _suggest_parked_frequencies(
     freqs_mhz: np.ndarray,
     spectrum: np.ndarray,
     transition_centers_mhz: np.ndarray,
+    placement: str = _PLACEMENT_AUTO,
 ) -> tuple[ParkedFrequencyPlanEntry, ...]:
+    freqs = np.asarray(freqs_mhz, dtype=float)
+    values = np.asarray(spectrum, dtype=float)
     centers = np.sort(np.asarray(transition_centers_mhz, dtype=float))
-    local_fits = fit_local_dips(freqs_mhz, spectrum, centers, window_mhz=8.0, model="pseudo_voigt")
-    gradient = np.gradient(np.asarray(spectrum, dtype=float), np.asarray(freqs_mhz, dtype=float))
+    gradient = np.gradient(values, freqs)
+    if placement in {_PLACEMENT_EMPIRICAL_HALF_MAX, _PLACEMENT_AUTO}:
+        placement_factor = _PLACEMENT_FACTORS[_PLACEMENT_HALF_MAX]
+    else:
+        placement_factor = _PLACEMENT_FACTORS.get(placement, _PLACEMENT_FACTORS[_PLACEMENT_MAX_SLOPE])
+
+    # Detect all sub-peaks without merging so resolved hyperfine components
+    # (e.g. 15N doublets) are found as separate candidates.
+    sub_candidates = detect_baseline_corrected_dip_candidates(
+        freqs, values,
+        min_prominence_sigma=1.0,
+        baseline_window_mhz=30.0,
+        smooth_window_mhz=1.5,
+        min_width_mhz=0.3,
+        max_width_mhz=10.0,
+        min_distance_mhz=1.0,
+        max_dips=None,
+    )
+    sub_clusters = cluster_dip_candidates(sub_candidates, merge_distance_mhz=0.5)
+    sub_centers_arr, _ = collapse_candidate_clusters(sub_clusters, max_centers=None)
+
+    successful_fits: list = []
+    if len(sub_centers_arr) > 0:
+        raw_fits = fit_local_dips(freqs, values, sub_centers_arr,
+                                   window_mhz=8.0, model="gaussian", hyperfine_merge_mhz=0.0)
+        successful_fits = [f for f in raw_fits if f.success]
+
     plan: list[ParkedFrequencyPlanEntry] = []
-
-    window_mhz = 8.0
-    successful_linewidths: list[float] = []
-    for fit in local_fits:
-        if fit.success:
-            successful_linewidths.append(float(fit.linewidth_mhz))
-
     for transition_index, center_guess in enumerate(centers[:8]):
-        matching_fit = None
-        matching_distance = float("inf")
-        for fit in local_fits:
-            if not fit.success:
-                continue
-            distance = abs(float(fit.center_mhz) - float(center_guess))
-            if distance > window_mhz / 2.0:
-                continue
-            if distance < matching_distance:
-                matching_fit = fit
-                matching_distance = distance
-
-        center = float(matching_fit.center_mhz) if matching_fit is not None else float(center_guess)
-        if matching_fit is not None:
-            linewidth = float(matching_fit.linewidth_mhz)
+        # Search window: no wider than half the gap to the nearest other transition
+        # center, capped at 4 MHz to avoid cross-transition contamination.
+        if len(centers) > 1:
+            gaps = [abs(float(center_guess) - float(c)) for c in centers
+                    if abs(float(center_guess) - float(c)) > 1e-6]
+            search_window = min(4.0, min(gaps) / 2.0)
         else:
-            mask = np.abs(np.asarray(freqs_mhz, dtype=float) - float(center_guess)) <= window_mhz
-            lf = np.asarray(freqs_mhz, dtype=float)[mask]
-            lv = np.asarray(spectrum, dtype=float)[mask]
-            linewidth = _estimate_local_fwhm_mhz(lf, lv, window_mhz)
-            if linewidth < 0.2 or linewidth >= 29.0:
-                if successful_linewidths:
-                    linewidth = float(np.median(successful_linewidths))
-                else:
-                    raise ValueError(
-                        f"Could not estimate linewidth for transition {transition_index} at {center_guess:.3f} MHz: "
-                        "no successful fits and peak-widths estimate is degenerate"
-                    )
-        f_minus = center - linewidth / 2.0
-        f_plus = center + linewidth / 2.0
+            search_window = 4.0
+
+        local_fits = sorted(
+            [f for f in successful_fits if abs(f.center_mhz - float(center_guess)) <= search_window],
+            key=lambda f: f.center_mhz,
+        )
+
+        if local_fits:
+            fl = local_fits[0]   # leftmost sub-peak  → DB side
+            fr = local_fits[-1]  # rightmost sub-peak → IB side
+            fwhm_l = _safe_fwhm(fl.linewidth_mhz)
+            fwhm_r = _safe_fwhm(fr.linewidth_mhz)
+            center = float(0.5 * (fl.center_mhz + fr.center_mhz))
+            linewidth = float(0.5 * (fwhm_l + fwhm_r))
+            contrast = float(np.median([fl.contrast, fr.contrast]))
+            effective_placement = _auto_placement_for_fit(contrast) if placement == _PLACEMENT_AUTO else placement
+            if effective_placement == _PLACEMENT_EMPIRICAL_HALF_MAX:
+                local_factor = _PLACEMENT_FACTORS[_PLACEMENT_HALF_MAX]
+            else:
+                local_factor = _PLACEMENT_FACTORS.get(effective_placement, _PLACEMENT_FACTORS[_PLACEMENT_MAX_SLOPE])
+            target_adc = None
+            if effective_placement == _PLACEMENT_EMPIRICAL_HALF_MAX:
+                target_adc = float(np.median([
+                    fl.baseline - 0.5 * fl.contrast,
+                    fr.baseline - 0.5 * fr.contrast,
+                ]))
+            f_minus = float(fl.center_mhz) - fwhm_l * local_factor
+            f_plus = float(fr.center_mhz) + fwhm_r * local_factor
+        else:
+            # Fallback: direct fit at the given transition center.
+            fallback = fit_local_dips(freqs, values, np.asarray([float(center_guess)]),
+                                       window_mhz=8.0, model="gaussian", hyperfine_merge_mhz=0.0)
+            if fallback and fallback[0].success:
+                f0 = fallback[0]
+                center = float(f0.center_mhz)
+                linewidth = _safe_fwhm(f0.linewidth_mhz)
+                contrast = float(f0.contrast)
+                effective_placement = _auto_placement_for_fit(contrast) if placement == _PLACEMENT_AUTO else placement
+                target_adc = float(f0.baseline - 0.5 * f0.contrast) if effective_placement == _PLACEMENT_EMPIRICAL_HALF_MAX else None
+            else:
+                center = float(center_guess)
+                linewidth = _FWHM_FALLBACK_MHZ
+                effective_placement = _PLACEMENT_HALF_MAX if placement == _PLACEMENT_AUTO else placement
+                target_adc = None
+            if effective_placement == _PLACEMENT_EMPIRICAL_HALF_MAX:
+                local_factor = _PLACEMENT_FACTORS[_PLACEMENT_HALF_MAX]
+            else:
+                local_factor = _PLACEMENT_FACTORS.get(effective_placement, _PLACEMENT_FACTORS[_PLACEMENT_MAX_SLOPE])
+            f_minus = center - linewidth * local_factor
+            f_plus = center + linewidth * local_factor
+
+        # Empirical override: seed at continuous-frequency max slope, then
+        # correct to one equal-ADC target with minimal frequency displacement.
+        slope_minus = float(np.interp(f_minus, freqs, gradient))
+        slope_plus  = float(np.interp(f_plus,  freqs, gradient))
+        if effective_placement in {_PLACEMENT_EMPIRICAL, _PLACEMENT_EMPIRICAL_HALF_MAX}:
+            em_db, em_ib, em_slope_db, em_slope_ib = _empirical_parking_pair(
+                freqs,
+                values,
+                center,
+                search_window,
+                other_peak_centers=[float(f.center_mhz) for f in successful_fits],
+                expected_minus_mhz=f_minus,
+                expected_plus_mhz=f_plus,
+                target_adc=target_adc,
+            )
+            if em_db is not None and em_ib is not None:
+                f_minus, f_plus = em_db, em_ib
+                slope_minus, slope_plus = em_slope_db, em_slope_ib
 
         plan.append(
             ParkedFrequencyPlanEntry(
@@ -696,8 +993,8 @@ def _suggest_parked_frequencies(
                 linewidth_mhz=linewidth,
                 frequency_minus_mhz=f_minus,
                 frequency_plus_mhz=f_plus,
-                slope_minus_per_mhz=float(np.interp(f_minus, freqs_mhz, gradient)),
-                slope_plus_per_mhz=float(np.interp(f_plus, freqs_mhz, gradient)),
+                slope_minus_per_mhz=slope_minus,
+                slope_plus_per_mhz=slope_plus,
             )
         )
 
