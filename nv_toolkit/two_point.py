@@ -286,9 +286,13 @@ def normalised_signal_from_counts(
     signal_counts: float,
     reference_counts: float,
 ) -> float:
-    if reference_counts <= 0:
-        raise ValueError(f"reference_counts must be > 0, got {reference_counts}")
-    return float(signal_counts) / float(reference_counts)
+    if reference_counts == 0:
+        raise ValueError(f"reference_counts must be non-zero, got {reference_counts}")
+    # Normalize by the magnitude of the reference so the convention is identical for
+    # positive PL (reference > 0, unchanged) and negative homodyne ADC (reference < 0):
+    # dips stay pointing down in both cases. Must match the reconstruction calibration,
+    # which is built from mw_on / |mw_off| on the reference sweep.
+    return float(signal_counts) / abs(float(reference_counts))
 
 
 def estimate_delta_B_projection_from_counts_mT(
