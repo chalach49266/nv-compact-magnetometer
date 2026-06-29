@@ -520,7 +520,7 @@ def fit_local_dips(
         linewidth0 = _estimate_local_fwhm_mhz(local_freqs, local_values, win)
 
         lower = [center_guess - win, 0.2, 0.0, float(np.min(local_values) - 0.05)]
-        upper = [center_guess + win, 29.0, 0.2, float(np.max(local_values) + 0.05)]
+        upper = [center_guess + win, 29.0, 1.0, float(np.max(local_values) + 0.05)]
         x0 = [center0, linewidth0, contrast0, baseline0]
         if model_name == "pseudo_voigt":
             x0.append(0.5)

@@ -527,7 +527,7 @@ def _load_operator_full_scan(path: Path, input_format: str) -> tuple[np.ndarray,
             if RAW_FREQUENCY_COLUMN in raw_columns and RAW_MW_ON_COLUMN in raw_columns:
                 freqs = np.asarray(raw_columns[RAW_FREQUENCY_COLUMN], dtype=float)
                 mw_on = np.asarray(raw_columns[RAW_MW_ON_COLUMN], dtype=float)
-                measured = mw_on / float(np.median(mw_on))
+                measured = mw_on / abs(float(np.median(mw_on)))
                 # Direct port of the phase1 compute_parking_simple pipeline.
                 candidates = detect_baseline_corrected_dip_candidates(
                     freqs, mw_on, min_prominence_sigma=1.0,

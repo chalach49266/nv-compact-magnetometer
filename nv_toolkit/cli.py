@@ -227,7 +227,7 @@ def _load_reconstruction_input(args: argparse.Namespace) -> dict[str, object]:
         peak_trace = measured
         peak_mode = "normalized"
     else:
-        measured = signal / float(np.median(signal))
+        measured = signal / abs(float(np.median(signal)))
         peak_trace = signal
         peak_mode = "baseline_corrected_raw_mw_on"
 
