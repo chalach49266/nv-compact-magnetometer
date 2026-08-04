@@ -135,29 +135,91 @@ def run_fast_pl_no_display(
     return df
 
 
+def _live_odmr_sensitivity(d_live, prog_odmr):
+    """Structure-aware η_B from one ODMR sweep. Soft-imports notebook helper."""
+    try:
+        from odmr_sensitivity import estimate_sensitivity
+    except ImportError:
+        return None
+
+    cfg = getattr(prog_odmr, "cfg", None)
+    point_time_s = None
+    if cfg is not None and hasattr(prog_odmr, "total_time") and getattr(cfg, "nsweep_points", 0):
+        try:
+            point_time_s = float(prog_odmr.total_time()) / float(cfg.nsweep_points)
+        except Exception:
+            point_time_s = None
+
+    try:
+        res = estimate_sensitivity(d_live, point_time_s=point_time_s, config=cfg)
+    except Exception:
+        return None
+
+    best = res.get("best")
+    if not best or best not in res:
+        return None
+    r = res[best]
+    return {
+        "best": best,
+        "eta_white_nT": float(r["sensitivity_t_rt_hz_white"]) * 1e9,
+        "eta_base_nT": float(r["sensitivity_t_rt_hz"]) * 1e9,
+        "f_op_mhz": float(r["f_at_slope_mhz"]),
+        "slope": float(r["slope_adc_per_mhz"]),
+        "noise_white": float(r["noise_white"]),
+        "noise_baseline": float(r["noise_baseline"]),
+    }
+
+
 def run_live_odmr(
     prog_odmr,
     *,
     os_mhz: float = 0.0,
     xlim: tuple[float | None, float | None] | None = None,
     title: str = "Live ODMR — MW ON PL vs Frequency",
+    show_sensitivity: bool = True,
 ) -> None:
     """
     Plot live ODMR with lightweight figure updates.
 
     Refresh rate is still limited by one full ODMR sweep per `prog_odmr.acquire()`
     call. To speed it up, narrow the sweep range and/or reduce `config_odmr.reps`.
+
+    When ``show_sensitivity`` is True (default), each sweep also runs the
+    structure-aware ODMR sensitivity estimator and overlays η_B on the title
+    plus a marker at the steepest-slope operating frequency.
     """
 
     plt.ion()
-    fig, ax = plt.subplots(figsize=(10, 5))
-    line, = ax.plot([], [], color="steelblue", linewidth=1.5)
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+    line, = ax.plot([], [], color="steelblue", linewidth=1.5, label="MW ON PL")
+    op_line = ax.axvline(
+        0.0,
+        color="crimson",
+        linestyle="--",
+        linewidth=1.2,
+        alpha=0.85,
+        label="max |dS/df|",
+        visible=False,
+    )
+    sens_text = ax.text(
+        0.02,
+        0.98,
+        "",
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=10,
+        family="monospace",
+        bbox={"boxstyle": "round,pad=0.35", "facecolor": "white", "alpha": 0.85, "edgecolor": "0.7"},
+    )
     ax.set_xlabel("Frequency (MHz)")
     ax.set_ylabel("PL Intensity (ADC units)")
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
+    ax.legend(loc="lower right", fontsize=8)
 
     handle = display(fig, display_id=True)
+    last_sens_label = "η: waiting for first sweep…"
 
     try:
         while True:
@@ -176,6 +238,34 @@ def run_live_odmr(
                     float(freqs_display[-1]) if right is None else float(right),
                 )
 
+            if show_sensitivity:
+                sens = _live_odmr_sensitivity(d_live, prog_odmr)
+                if sens is not None:
+                    f_op_display = sens["f_op_mhz"] + float(os_mhz)
+                    op_line.set_xdata([f_op_display, f_op_display])
+                    op_line.set_visible(True)
+                    last_sens_label = (
+                        f"η = {sens['eta_white_nT']:.1f}–{sens['eta_base_nT']:.1f} nT/√Hz"
+                        f"  ({sens['best']})\n"
+                        f"op @ {f_op_display:.1f} MHz"
+                        f"  slope={sens['slope']:.1f} ADC/MHz\n"
+                        f"noise w/b = {sens['noise_white']:.3f}/{sens['noise_baseline']:.3f}"
+                    )
+                    ax.set_title(
+                        f"{title}\n"
+                        f"η = {sens['eta_white_nT']:.1f}–{sens['eta_base_nT']:.1f} nT/√Hz"
+                        f" ({sens['best']}) @ {f_op_display:.1f} MHz"
+                    )
+                else:
+                    op_line.set_visible(False)
+                    last_sens_label = "η: fit failed / unavailable"
+                    ax.set_title(f"{title}\nη: fit failed / unavailable")
+                sens_text.set_text(last_sens_label)
+            else:
+                op_line.set_visible(False)
+                sens_text.set_text("")
+                ax.set_title(title)
+
             ax.relim()
             ax.autoscale_view(scalex=False, scaley=True)
 
@@ -184,6 +274,8 @@ def run_live_odmr(
 
     except KeyboardInterrupt:
         print("Live plot stopped.")
+        if show_sensitivity and last_sens_label:
+            print(last_sens_label.replace("\n", " | "))
     finally:
         plt.ioff()
         plt.close(fig)

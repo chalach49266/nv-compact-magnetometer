@@ -249,7 +249,219 @@ def estimate_odmr_sensitivity(
         return result
 
 
-def quick_sensitivity(
+# Backwards-compatible alias: the single-Lorentzian estimator is the "legacy" method.
+estimate_odmr_sensitivity_legacy = estimate_odmr_sensitivity
+
+
+# =============================================================================
+# Structure-aware sensitivity (handles Zeeman doublets / hyperfine).
+#
+# The legacy estimator above fits ONE Lorentzian to the whole resonance, so a
+# split/hyperfine line is fitted as a single broad envelope -> the slope is
+# roughly halved and the sensitivity comes out ~2x worse than reality. The
+# functions below instead:
+#   * fit a sum of Lorentzians (one per detected line) over the central
+#     resonance and take the analytic max |dS/df| on the steepest flank,
+#   * estimate noise on the genuinely off-resonance points two ways: the
+#     successive-difference white floor and a sigma-clipped detrended baseline
+#     (the clip removes broad off-axis lines the central mask misses).
+# The sensitivity formula itself is unchanged.
+# =============================================================================
+
+
+def _multi_lorentzian(x, off, *params):
+    y = np.full_like(x, off, dtype=float)
+    for i in range(len(params) // 3):
+        c, g, a = params[3 * i:3 * i + 3]
+        y = y + a * g ** 2 / ((x - c) ** 2 + g ** 2)
+    return y
+
+
+def _multi_lorentzian_deriv(x, params):  # params = flat [c, g, a] * n
+    d = np.zeros_like(x, dtype=float)
+    for i in range(len(params) // 3):
+        c, g, a = params[3 * i:3 * i + 3]
+        d = d + a * g ** 2 * (-2.0 * (x - c)) / ((x - c) ** 2 + g ** 2) ** 2
+    return d
+
+
+def _detect_dips(freq, trace, step, prom_frac=0.06, min_sep_mhz=3.0):
+    from scipy.signal import find_peaks
+    y = savgol_filter(trace, min(9, len(trace) - (len(trace) + 1) % 2), 3)
+    dip = -(y - np.median(y))
+    span = float(dip.max() - dip.min())
+    if span <= 0:
+        return np.array([])
+    pk, _ = find_peaks(dip, prominence=max(span * prom_frac, 1e-9),
+                       distance=max(int(min_sep_mhz / step), 1))
+    return freq[pk]
+
+
+def _resonance_window(freq, trace, halfwidth_mhz):
+    center = float(freq[int(np.argmax(np.abs(trace - np.median(trace))))])
+    return center - halfwidth_mhz, center + halfwidth_mhz
+
+
+def _fit_max_slope(freq, y, window, step, max_lines=6):
+    """Multi-Lorentzian fit over `window`; return analytic max |dS/df| (ADC/MHz)."""
+    lo, hi = window
+    m = (freq >= lo) & (freq <= hi)
+    xc, yc = freq[m], y[m]
+    if len(xc) < 6:
+        xc, yc, m = freq, y, np.ones_like(freq, bool)
+    centers = _detect_dips(xc, yc, step, prom_frac=0.05)
+    if len(centers) == 0:
+        centers = np.array([xc[int(np.argmin(yc))]])
+    centers = centers[:max_lines]
+    off0 = float(np.median(np.concatenate([yc[:3], yc[-3:]])))
+    p0 = [off0]
+    lb = [-np.inf]
+    ub = [np.inf]
+    for c in centers:
+        p0 += [float(c), 3.0, float(yc.min() - off0)]
+        lb += [float(c) - 6.0, 0.5, -np.inf]
+        ub += [float(c) + 6.0, 18.0, np.inf]
+    popt = None
+    try:
+        popt, _ = curve_fit(_multi_lorentzian, xc, yc, p0=p0,
+                            bounds=(lb, ub), maxfev=300000)
+    except Exception:
+        try:
+            popt, _ = curve_fit(_multi_lorentzian, xc, yc, p0=p0, maxfev=300000)
+        except Exception:
+            popt = None
+
+    # Model-free numeric slope (cross-check / overfit guard / fallback).
+    win = min(11, len(y) if len(y) % 2 == 1 else len(y) - 1)
+    win = max(win, 5)
+    deriv_num = savgol_filter(y, win, 3, deriv=1, delta=step)
+    numeric_slope = float(np.max(np.abs(deriv_num[m])))
+
+    if popt is None:
+        return {"slope": numeric_slope, "f_at_slope": float(freq[m][int(np.argmax(np.abs(deriv_num[m])))]),
+                "n_lines": 0, "popt": None, "window": window, "numeric_slope": numeric_slope}
+
+    xfine = np.linspace(xc.min(), xc.max(), 6000)
+    der = _multi_lorentzian_deriv(xfine, popt[1:])
+    k = int(np.argmax(np.abs(der)))
+    fit_slope = float(np.abs(der[k]))
+    # Guard against fitting a too-narrow line to a noise spike.
+    if not np.isfinite(fit_slope) or fit_slope > 3.0 * max(numeric_slope, 1e-9):
+        return {"slope": numeric_slope, "f_at_slope": float(freq[m][int(np.argmax(np.abs(deriv_num[m])))]),
+                "n_lines": len(centers), "popt": popt, "window": window, "numeric_slope": numeric_slope}
+    return {"slope": fit_slope, "f_at_slope": float(xfine[k]), "n_lines": len(centers),
+            "popt": popt, "window": window, "numeric_slope": numeric_slope}
+
+
+def _noise_estimates(freq, y, init_mask, k=4.0, n_iter=6):
+    """White (successive-difference) noise + sigma-clipped detrended baseline."""
+    if init_mask.sum() > 3:
+        sdiff = float(np.std(np.diff(y[init_mask]), ddof=1) / np.sqrt(2))
+    else:
+        sdiff = float(np.std(y[init_mask], ddof=1)) if init_mask.sum() > 1 else np.nan
+    m = init_mask.copy()
+    deg = 3 if init_mask.sum() > 8 else 1
+    for _ in range(n_iter):
+        coef = np.polyfit(freq[m], y[m], deg)
+        resid = y - np.polyval(coef, freq)
+        m_new = init_mask & (np.abs(resid) < k * max(sdiff, 1e-9))
+        if m_new.sum() < 15 or np.array_equal(m_new, m):
+            m = m_new if m_new.sum() >= 15 else m
+            break
+        m = m_new
+    coef = np.polyfit(freq[m], y[m], deg)
+    baseline = float(np.std((y - np.polyval(coef, freq))[m], ddof=1))
+    return {"sdiff": sdiff, "baseline": baseline, "n_clean": int(m.sum())}
+
+
+def estimate_sensitivity(
+    data,
+    *,
+    traces=("signal", "reference", "contrast"),
+    point_time_s=None,
+    qd_module=None,
+    config=None,
+    gamma_hz_per_t=GYROMAGNETIC_RATIO_GHZ_PER_T * 1e9,
+    resonance_window_mhz=None,
+    resonance_halfwidth_mhz=30.0,
+    noise_guard_mhz=18.0,
+):
+    """Structure-aware ODMR magnetic sensitivity for every available trace.
+
+    Returns a dict keyed by trace name, each with the fitted slope, both noise
+    estimates and sensitivities (white floor and conservative baseline), plus a
+    ``best`` key naming the trace with the lowest baseline sensitivity.
+
+    eta_B = sigma * sqrt(t_point) / (gamma * |dS/df|_max)   [T / sqrt(Hz)]
+    """
+    point_time_s = _get_point_time_s(point_time_s=point_time_s, qd_module=qd_module, config=config)
+
+    x = np.asarray(data.frequencies, dtype=float)  # MHz
+    order = np.argsort(x)
+    x = x[order]
+    step = float(np.median(np.diff(x))) if len(x) > 1 else 1.0
+
+    available = {}
+    for name in traces:
+        if hasattr(data, name):
+            y = np.asarray(getattr(data, name), dtype=float)[order]
+            if np.isfinite(y).sum() >= 5:
+                available[name] = y
+    if not available:
+        raise ValueError("No usable traces found on data (expected signal/reference/contrast).")
+
+    # Common resonance window from the clearest trace.
+    if resonance_window_mhz is not None:
+        window = tuple(resonance_window_mhz)
+    else:
+        if "reference" in available:
+            ref_trace = available["reference"]
+        elif "contrast" in available:
+            ref_trace = available["contrast"]
+        else:
+            ref_trace = next(iter(available.values()))
+        window = _resonance_window(x, ref_trace, resonance_halfwidth_mhz)
+
+    # Off-resonance mask: exclude +/- guard around every detected line on every trace.
+    features = []
+    for y in available.values():
+        features.append(_detect_dips(x, y, step))
+    features = np.unique(np.concatenate(features)) if features else np.array([])
+    init_mask = np.ones_like(x, bool)
+    for c in features:
+        init_mask &= np.abs(x - c) > noise_guard_mhz
+
+    results = {}
+    for name, y in available.items():
+        fit = _fit_max_slope(x, y, window, step)
+        noise = _noise_estimates(x, y, init_mask)
+        slope_per_hz = fit["slope"] / 1e6  # ADC per Hz
+        denom = gamma_hz_per_t * slope_per_hz
+        eta_white = (noise["sdiff"] * np.sqrt(point_time_s) / denom) if denom > 0 else np.nan
+        eta_base = (noise["baseline"] * np.sqrt(point_time_s) / denom) if denom > 0 else np.nan
+        results[name] = {
+            "trace": name,
+            "slope_adc_per_mhz": fit["slope"],
+            "slope_numeric_adc_per_mhz": fit["numeric_slope"],
+            "f_at_slope_mhz": fit["f_at_slope"],
+            "n_lines": fit["n_lines"],
+            "noise_white": noise["sdiff"],
+            "noise_baseline": noise["baseline"],
+            "n_clean_points": noise["n_clean"],
+            "point_time_s": float(point_time_s),
+            "sensitivity_t_rt_hz_white": float(eta_white),
+            "sensitivity_t_rt_hz": float(eta_base),  # baseline = conservative headline
+            "sensitivity_text": _format_sensitivity(eta_base),
+            "resonance_window_mhz": tuple(float(w) for w in window),
+        }
+
+    best = min(results, key=lambda n: results[n]["sensitivity_t_rt_hz"])
+    results["best"] = best
+    results["point_time_s"] = float(point_time_s)
+    return results
+
+
+def quick_sensitivity_legacy(
     data,
     *,
     trace="reference",
@@ -282,3 +494,60 @@ def quick_sensitivity(
             f"FWHM={result['fwhm_mhz']:.2f} MHz"
         )
     return result
+
+
+def quick_sensitivity(
+    data,
+    *,
+    point_time_s=None,
+    qd_module=None,
+    config=None,
+    show_legacy=True,
+    **legacy_kwargs,
+):
+    """Structure-aware ODMR sensitivity for every trace (signal / reference / contrast).
+
+    Drop-in replacement for the old single-Lorentzian ``quick_sensitivity``: call
+    ``quick_sensitivity(d)`` after an ODMR sweep. Handles Zeeman-split / hyperfine
+    resonances that the legacy estimator mis-fit as one broad line. Reports each
+    trace as a range (white-noise floor -> conservative detrended baseline) and
+    highlights the best trace. Pass ``show_legacy=False`` to hide the old number.
+
+    Returns the dict from :func:`estimate_sensitivity`.
+    """
+    res = estimate_sensitivity(
+        data, point_time_s=point_time_s, qd_module=qd_module, config=config
+    )
+    pt_us = res["point_time_s"] * 1e6
+    best = res["best"]
+
+    print(f"ODMR sensitivity (structure-aware)  |  t_point = {pt_us:.0f} us")
+    for name in ("signal", "reference", "contrast"):
+        if name not in res:
+            continue
+        r = res[name]
+        eta_lo = r["sensitivity_t_rt_hz_white"] * 1e9
+        eta_hi = r["sensitivity_t_rt_hz"] * 1e9
+        star = "  <-- best" if name == best else ""
+        print(
+            f"  {name:18s} slope={r['slope_adc_per_mhz']:6.2f} ADC/MHz @ {r['f_at_slope_mhz']:7.1f} MHz "
+            f"| noise w/b={r['noise_white']:.3f}/{r['noise_baseline']:.3f} "
+            f"| eta = {eta_lo:5.1f} - {eta_hi:5.1f} nT/sqrt(Hz){star}"
+        )
+    rb = res[best]
+    print(
+        f"  BEST: {best}  eta = {rb['sensitivity_t_rt_hz_white']*1e9:.1f} - "
+        f"{rb['sensitivity_t_rt_hz']*1e9:.1f} nT/sqrt(Hz) "
+        f"(operate at {rb['f_at_slope_mhz']:.1f} MHz)"
+    )
+
+    if show_legacy:
+        try:
+            leg = estimate_odmr_sensitivity_legacy(data, trace="reference",
+                                                   point_time_s=point_time_s,
+                                                   qd_module=qd_module, config=config)
+            leg = leg["reference"] if isinstance(leg, dict) and "reference" in leg else leg
+            print(f"  (legacy single-Lorentzian, reference: {leg['sensitivity_text']})")
+        except Exception:
+            pass
+    return res
