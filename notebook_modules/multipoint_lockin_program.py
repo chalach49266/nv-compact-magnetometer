@@ -13,16 +13,44 @@ reference shot fires MW at an off-resonance frequency (default 2650 MHz).
 
 Result: ONE FPGA program upload, then `reps` averaged measurements at all
 N frequencies in tight hardware sequence — same speed as a single ODMR sweep.
+
+Three ways to get data out, in increasing order of rate:
+
+    acquire()                 one averaged sample per call. The host round-trip is
+                              ~1.6 ms per call, so this caps out around 500 Hz however
+                              short the program is.
+    acquire(per_rep=True)     one call returns every rep as its own time sample
+                              ("burst"). Faster, but it re-arms the accumulated buffer
+                              once per burst, and if a run is still in flight when the
+                              next one is configured the readout can return the previous
+                              run's contents. Guarded by the freshness check in
+                              `acquire`; needs `reset_tproc=True`.
+    stream()                  one configuration, one tProc start, then nothing but
+                              draining the streamer queue. No per-batch reconfiguration,
+                              so no race, no duty-cycle hole, and timestamps that follow
+                              the FPGA cadence exactly. This is the path to 1 kHz+.
+
+See docs/2026-08-06_twopoint_timing/TIMING_AND_NOISE_ANALYSIS.md for the measurements
+behind those statements.
 """
 
 from __future__ import annotations
 
 import hashlib
+from time import perf_counter as _perf_counter
 
 import numpy as np
 from itemattribute import ItemAttribute
 
 from qickdawg.nvpulsing.nvaverageprogram import NVAveragerProgram
+
+try:
+    # Present when the board is reached over rpyc; unwraps remote objects into
+    # local ones. Pyro-only setups return plain data already.
+    from rpyc.utils.classic import obtain
+except ModuleNotFoundError:
+    def obtain(x):
+        return x
 
 
 class MultipointLockinODMR(NVAveragerProgram):
@@ -306,20 +334,8 @@ class MultipointLockinODMR(NVAveragerProgram):
             signal_all = data[..., 0::2]
             reference_all = data[..., 1::2]
 
-        # Fold emission slots back onto frequencies. This is a no-op for "forward",
-        # where slots and frequencies are the same thing. For "abba" it averages
-        # slot 0 with slot 3 and slot 1 with slot 2, which is what cancels a linear
-        # drift across the rep: the two visits to each frequency straddle the two
-        # visits to the other one, so the drift contributions are equal and opposite.
-        slot_map = np.asarray(self.slot_to_frequency_index())
-        if len(slot_map) != n_freqs:
-            def _fold(arr):
-                if arr is None:
-                    return None
-                return np.stack([arr[..., slot_map == k].mean(axis=-1)
-                                 for k in range(n_freqs)], axis=-1)
-            signal_all = _fold(signal_all)
-            reference_all = _fold(reference_all)
+        signal_all = self._fold_slots(signal_all)
+        reference_all = self._fold_slots(reference_all)
 
         if per_rep:
             # Keep axis 0 (reps) and the trailing frequency axis; collapse anything
@@ -356,6 +372,25 @@ class MultipointLockinODMR(NVAveragerProgram):
             with np.errstate(divide="ignore", invalid="ignore"):
                 d.contrast_percent = np.where(d.reference != 0, d.contrast / d.reference * 100.0, np.nan)
         return d
+
+    def _fold_slots(self, arr):
+        """Average the emission slots that share a parked frequency.
+
+        A no-op for "forward", where slots and frequencies are the same thing. For
+        "abba" it averages slot 0 with slot 3 and slot 1 with slot 2, which is what
+        cancels a linear drift across the rep: the two visits to each frequency
+        straddle the two visits to the other one, so the drift contributions are
+        equal and opposite. Operates on the trailing axis, so it works for both the
+        averaged and the per-rep shapes.
+        """
+        if arr is None:
+            return None
+        n_freqs = len(self.cfg.multipoint_freqs_mhz)
+        slot_map = np.asarray(self.slot_to_frequency_index())
+        if len(slot_map) == n_freqs:
+            return arr
+        return np.stack([arr[..., slot_map == k].mean(axis=-1)
+                         for k in range(n_freqs)], axis=-1)
 
     def time_per_rep(self, include_relax=False):
         """Seconds of FPGA pulse work per rep.
@@ -397,6 +432,155 @@ class MultipointLockinODMR(NVAveragerProgram):
         reps = int(self.cfg.reps if reps is None else reps)
         overhead = self.HOST_OVERHEAD_S if host_overhead_s is None else host_overhead_s
         return 1.0 / (reps * self.time_per_rep() + overhead)
+
+    def stream(self, duration_s=None, total_reps=None, poll_timeout_s=10.0,
+               progress=False):
+        """Yield per-rep samples continuously from one uninterrupted FPGA run.
+
+        This is the high-rate path, and the one to use for anything above a few
+        hundred Hz. `acquire()` pays the host round-trip once per call, so calling
+        it per sample caps the rate at ~1/(1.6 ms) however short the program is,
+        and calling it per burst leaves a dead gap between bursts and re-arms the
+        accumulated buffer under a possibly-still-running program -- the race that
+        made burst mode record 50% duplicates.
+
+        `stream()` configures once, starts the tProc once, and then only drains the
+        streamer queue. There is no per-batch reconfiguration, so:
+
+          * the race cannot occur -- nothing is re-armed mid-run;
+          * there is no duty-cycle hole -- the FPGA runs continuously;
+          * timestamps follow the FPGA cadence exactly, because the samples are
+            consecutive reps of a single program. Use
+            `t0 + (packet.first_rep + arange(packet.n_reps)) * time_per_rep()`,
+            never wall-clock arrival times, which only measure when the host
+            happened to drain the queue.
+
+        Parameters
+        ----------
+        duration_s : float, optional
+            Approximate run length. Converted to a rep count via `time_per_rep()`.
+        total_reps : int, optional
+            Exact rep count; overrides `duration_s`. One of the two is required.
+        poll_timeout_s : float
+            Give up if the board sends nothing for this long.
+        progress : bool
+            Print a line per packet.
+
+        Yields
+        ------
+        ItemAttribute with:
+            first_rep        index of this packet's first rep within the run
+            n_reps           reps in this packet
+            signal           (n_reps, n_freqs) normalised counts
+            reference        (n_reps, n_freqs) or None
+            frequencies_mhz  the parked frequencies
+            t_offset_s       first_rep * time_per_rep(), seconds from the run start
+
+        Notes
+        -----
+        The board-side worker transfers in strides of ~10% of the accumulated
+        buffer and raises if unread samples ever reach `avg_maxlen`. It runs
+        autonomously, so it keeps up on its own; at these rates (a few kHz, one
+        read per shot) the DMA has orders of magnitude of headroom. `stream_headroom()`
+        reports the actual margin for a given configuration.
+        """
+        import qickdawg as qd
+
+        if total_reps is None:
+            if duration_s is None:
+                raise ValueError("stream() needs duration_s or total_reps")
+            total_reps = max(1, int(round(float(duration_s) / self.time_per_rep())))
+
+        n_slots = len(self.emission_order())
+        per_freq = 1 if getattr(self.cfg, "multipoint_skip_reference", False) else 2
+        reads_per_shot = per_freq * n_slots
+
+        # The program loops `reps` times and ends, so the rep count IS the run
+        # length. Rebuild the program at the requested size.
+        if int(self.cfg.reps) != int(total_reps):
+            raise ValueError(
+                f"stream() needs cfg.reps == total_reps ({total_reps}), got {self.cfg.reps}. "
+                f"Build the program with reps=total_reps -- the tProc loop count is the "
+                f"run length, and it cannot be changed after compilation."
+            )
+
+        self.set_reads_per_shot(reads_per_shot)
+        self.config_all(qd.soc, load_envelopes=True, reset=True, load_mem=True)
+        qd.soc.start_src("internal")
+        self.get_data_shape(reads_per_shot)
+        self.config_bufs(qd.soc, enable_avg=True, enable_buf=False)
+
+        # One start for the whole run. Everything after this is just draining.
+        qd.soc.start_readout(total_reps, counter_addr=self.counter_addr,
+                             ch_list=list(self.ro_chs), reads_per_shot=self.reads_per_shot)
+
+        scale = float(self.cfg.readout_integration_treg)
+        cadence = self.time_per_rep()
+        freqs = np.asarray(self.cfg.multipoint_freqs_mhz, dtype=float)
+        collected = 0
+        idle_since = _perf_counter()
+
+        while collected < total_reps:
+            packets = obtain(qd.soc.poll_data())
+            if not packets:
+                if _perf_counter() - idle_since > poll_timeout_s:
+                    raise RuntimeError(
+                        f"stream() received no data for {poll_timeout_s:.0f} s after "
+                        f"{collected}/{total_reps} reps. The tProc may have stopped early."
+                    )
+                continue
+            idle_since = _perf_counter()
+
+            for n_reps, (acc_buf, _stats) in packets:
+                if n_reps <= 0 or acc_buf is None:
+                    continue
+                # acc_buf[0] is (n_reps * reads_per_shot, 2); NV readouts are DC, so
+                # only the I column carries signal.
+                block = np.asarray(acc_buf[0], dtype=float)[:, 0]
+                block = block.reshape(n_reps, reads_per_shot) / scale
+
+                if per_freq == 1:
+                    signal, reference = block, None
+                else:
+                    signal, reference = block[:, 0::2], block[:, 1::2]
+
+                out = ItemAttribute()
+                out.per_rep = True
+                out.first_rep = collected
+                out.n_reps = int(n_reps)
+                out.t_offset_s = collected * cadence
+                out.frequencies_mhz = freqs
+                out.signal = self._fold_slots(signal)
+                out.reference = self._fold_slots(reference)
+                collected += int(n_reps)
+
+                if progress:
+                    print(f"  stream: +{n_reps} reps ({collected}/{total_reps}, "
+                          f"t = {out.t_offset_s:.3f} s)")
+                yield out
+
+    def stream_headroom(self):
+        """How much margin the streaming path has against buffer overflow.
+
+        Returns a dict with the accumulated-buffer length, the per-shot read count,
+        and how many seconds of acquisition fit in the buffer. Values well above the
+        board worker's own transfer period mean the configuration is safe.
+        """
+        import qickdawg as qd
+
+        n_slots = len(self.emission_order())
+        per_freq = 1 if getattr(self.cfg, "multipoint_skip_reference", False) else 2
+        reads_per_shot = per_freq * n_slots
+        ch = int(self.cfg.adc_channel)
+        avg_maxlen = int(qd.soc['readouts'][ch]['avg_maxlen'])
+        shots = avg_maxlen // reads_per_shot
+        return {
+            "avg_maxlen": avg_maxlen,
+            "reads_per_shot": reads_per_shot,
+            "shots_that_fit": shots,
+            "seconds_that_fit": shots * self.time_per_rep(),
+            "worker_stride_shots": max(1, int(0.1 * shots)),
+        }
 
     def describe_timing(self, reps=None):
         """One-line human summary of the rate this configuration will deliver."""
