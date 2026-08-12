@@ -162,7 +162,7 @@ class NVAveragerProgram(QickRegisterManagerMixin, AcquireProgram):
 
     def acquire(self, load_pulses=True, readouts_per_experiment: Optional[int] = None,
                 save_experiments: List = None, start_src: str = "internal",
-                progress=False, remove_offset=True):
+                progress=False, remove_offset=True, reset_tproc: bool = False):
         """
         Method that exectues the qick program and accumulates data from the data buffer until the proram is complete
         For NV measurements, the results are DC values and thus only have I values (rather than I and Q)
@@ -184,6 +184,17 @@ class NVAveragerProgram(QickRegisterManagerMixin, AcquireProgram):
             Some readouts (muxed and tProc-configured) introduce a small fixed offset to the I and Q
             values of every decimated sample. This subtracts that offset, if any, before returning the
             averaged IQ values or rotating to apply software thresholding.
+        reset_tproc : bool
+            Force-stop the tProc before configuring the next run, instead of qick's default
+            lazy stop (which does nothing at all on tProc v1). Costs a reset + program reload,
+            tens of ms, so it is off by default and existing callers are unaffected.
+
+            Turn it on when one program run is long enough that the host can come back around
+            while it is still executing -- burst mode is the case that matters. Without it the
+            accumulated buffer is re-armed under a still-running program and the next readout
+            can return the *previous* run's contents: on the 2026-08-06 burst data every second
+            acquire came back in 13 ms instead of 425 ms with 95.7% of its rows bit-identical to
+            the batch before it. See docs/2026-08-06_twopoint_timing/.
 
         Returns
         -------
@@ -211,10 +222,20 @@ class NVAveragerProgram(QickRegisterManagerMixin, AcquireProgram):
         if not getattr(self, 'reads_per_shot', None) and hasattr(self, 'ro_chs') and self.ro_chs:
             self.reads_per_shot = [ro['trigs'] for ro in self.ro_chs.values()]
 
+        # qick names this parameter `load_envelopes`; it has never been called
+        # `load_pulses`. Passing the wrong keyword raised TypeError on *every*
+        # acquire and fell through to the bare call below, which takes the
+        # defaults -- including reset=False, i.e. stop_tproc(lazy=True), a
+        # documented no-op on tProc v1. So the tProc was never stopped between
+        # runs. Keep the fallback for qick versions that predate the keyword,
+        # but pass reset explicitly so the caller controls the stop.
         try:
-            self.config_all(qd.soc, load_pulses=load_pulses, load_mem=False)
+            self.config_all(qd.soc, load_envelopes=load_pulses, reset=reset_tproc,
+                            load_mem=True)
         except TypeError:
-            # Backward compatibility: older qick versions may not accept load_pulses/load_mem
+            logger.warning("config_all does not accept load_envelopes/reset/load_mem; "
+                           "falling back to defaults. The tProc will not be stopped "
+                           "between acquisitions on tProc v1.")
             self.config_all(qd.soc)
 
         # After config, use firmware readout counts unless the caller fixed reads_per_shot explicitly.
