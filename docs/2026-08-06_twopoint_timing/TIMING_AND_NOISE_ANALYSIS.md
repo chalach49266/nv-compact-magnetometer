@@ -26,10 +26,10 @@ not moved. **The readout window is the rate.** See §2.
 
 **2. 213 µs is past the sensitivity optimum.** Across a 17-point integration-time sweep,
 dip contrast is flat (0.49–0.54) and `σ_z·√τ` is constant below ~140 µs but rises above it —
-i.e. beyond ~140 µs the readout stops averaging down and starts collecting drift.
-Sensitivity η is **19.0 ± 0.8 nT/√Hz for τ ≤ 140 µs** against **23.8 ± 2.0 nT/√Hz for
+i.e. beyond ~140 µs the readout stops averaging down and starts collecting drift. Per-rep
+sensitivity η is **185 ± 7 nT/√Hz for τ ≤ 140 µs** against **232 ± 20 nT/√Hz for
 150–200 µs**. Moving 213 → 120 µs is **1.75× faster with no sensitivity cost** (the η
-difference, 19.3 vs 19.7, is inside the ±1.4 nT/√Hz sweep-to-sweep scatter). See §3.
+difference, 188 vs 192, is inside the ±14 nT/√Hz sweep-to-sweep scatter). See §3.
 
 **3. Burst mode records ~50% stale duplicate samples.** Acquires strictly alternate
 ~13 ms / ~425 ms, and **95.7% of the rows in each fast batch are bit-identical to the
@@ -195,15 +195,38 @@ immune to slow drift across the sweep. The figure of merit is the per-rep sensit
 
 | τ (µs) | contrast | σ_z | σ_z·√τ | σ(Δf) kHz | t_rep µs | **η nT/√Hz** | Hz @23 reps |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 50 | 0.541 | 3.01e-3 | 0.0213 | 51.3 | 109 | 19.1 ± 1.4 | 398 |
-| 90 | 0.517 | 2.13e-3 | 0.0202 | 37.0 | 189 | **18.2 ± 1.4** | 230 |
-| 110 | 0.515 | 1.90e-3 | 0.0199 | 33.7 | 229 | **18.2 ± 0.8** | 190 |
-| **120** | 0.514 | 1.98e-3 | 0.0217 | 34.9 | 249 | 19.7 ± 1.8 | 174 |
-| 130 | 0.507 | 1.70e-3 | 0.0194 | 30.6 | 269 | **17.9 ± 1.5** | 161 |
-| 140 | 0.506 | 1.71e-3 | 0.0202 | 30.6 | 289 | 18.6 ± 0.7 | 150 |
-| 170 | 0.513 | 2.01e-3 | 0.0262 | 35.6 | 349 | 23.8 ± 0.6 | 124 |
-| 190 | 0.495 | 2.09e-3 | 0.0288 | 38.4 | 389 | 27.1 ± 2.3 | 112 |
-| **213** | 0.531 | 1.52e-3 | 0.0222 | 25.9 | 435 | 19.3 ± 1.4 | **100** |
+| 50 | 0.541 | 3.01e-3 | 0.0213 | 51.3 | 109 | 186 ± 14 | 398 |
+| 90 | 0.517 | 2.13e-3 | 0.0202 | 37.0 | 189 | **177 ± 14** | 230 |
+| 110 | 0.515 | 1.90e-3 | 0.0199 | 33.7 | 229 | **178 ± 8** | 190 |
+| **120** | 0.514 | 1.98e-3 | 0.0217 | 34.9 | 249 | 192 ± 17 | 174 |
+| 130 | 0.507 | 1.70e-3 | 0.0194 | 30.6 | 269 | **175 ± 15** | 161 |
+| 140 | 0.506 | 1.71e-3 | 0.0202 | 30.6 | 289 | 181 ± 7 | 150 |
+| 170 | 0.513 | 2.01e-3 | 0.0262 | 35.6 | 349 | 232 ± 5 | 124 |
+| 190 | 0.495 | 2.09e-3 | 0.0288 | 38.4 | 389 | 264 ± 22 | 112 |
+| **213** | 0.531 | 1.52e-3 | 0.0222 | 25.9 | 435 | 188 ± 14 | **100** |
+
+**How η is computed, and a correction.** Sensitivity has to carry *both* time
+dependencies: σ_z falls with τ because a longer window integrates more photons, and a
+sample costs time proportional to τ. The trap is which time pairs with which σ. Each
+sweep point is an **average over `reps` reps**, so its σ corresponds to `reps × t_rep` of
+integration, not one rep. The first version of this table paired a reps-averaged σ with a
+single-rep time and so understated η by √reps — a factor of ~10.
+
+`reps` is not recorded in the sweep CSVs, and it cannot be recovered from file timestamps
+(those gaps are dominated by how fast the operator clicked: the median gap is 4 s while
+t_point varies 4×). It is instead cross-calibrated against the burst runs, which measure a
+genuine single-rep σ at τ = 213 µs — one of the scanned windows:
+
+| Quantity at τ = 213 µs | Value |
+|---|---:|
+| single-rep σ(Δf), from 7 burst runs | 252.2 kHz |
+| sweep-point σ(Δf) | 25.9 kHz |
+| ratio | 9.74 |
+| → reps averaged per sweep point | **~95** |
+
+The corrected figures are now consistent with an **independent** measurement: the white
+noise floor from the burst PSD is ~165 nT/√Hz (§3.2), against 185 nT/√Hz per rep here. The
+old 19 nT/√Hz was inconsistent with that PSD by 10×, which is what gave the error away.
 
 Three things follow:
 
@@ -211,16 +234,24 @@ Three things follow:
 2. **`σ_z·√τ` is flat below ~140 µs (0.0207) and rises above it (0.0252).** Below 140 µs the
    readout averages down as √time; above it, the extra window length is collecting drift
    instead of statistics. That is the physical reason the optimum exists.
-3. **η is flat at 19.0 ± 0.8 nT/√Hz for τ ≤ 140 µs**, then degrades to 23.8 ± 2.0 over
+3. **η is flat at 185 ± 7 nT/√Hz for τ ≤ 140 µs**, then degrades to 232 ± 20 over
    150–200 µs. Individual windows inside the flat band (90, 110, 130 µs) are not
    meaningfully better than one another — the sweep-to-sweep scatter at fixed τ is
-   ±1.4 nT/√Hz, larger than the spread between them.
+   ±14 nT/√Hz, larger than the spread between them.
 
-**Caveat on the 213 µs point.** It sits at 19.3 nT/√Hz, well below the 150–200 µs trend it
+**Caveat on the 213 µs point.** It sits at 188 nT/√Hz, well below the 150–200 µs trend it
 should continue, on the strength of an unusually low σ_z (1.52e-3). It is the configured
 default, so those sweeps were likely taken under different conditions from the rest of the
 scan. Treat it as an outlier rather than evidence that 213 µs is fine; the `σ_z·√τ` trend
 across 150–200 µs is the more reliable signal.
+
+**Caveat on the shape.** The scale correction above is a single constant, so it cannot
+change the *shape* of the curve. But the shape itself assumes `reps` was held constant
+across the τ scan. That is the natural reading of a controlled one-variable scan, and it is
+what `σ_z·√τ` being flat below 140 µs implies — but it is an assumption, not a measurement,
+and a reps change part-way through the scan could mimic the rise above 140 µs. The rig check
+at τ = 120 µs (§7, check 5) tests the conclusion directly and does not depend on it. The
+**rate** gain of 1.75× is pure timing and is certain either way.
 
 **Decision: τ = 120 µs.** It is inside the flat band, 1.75× faster than 213 µs, and its η
 difference from 213 µs is inside the measurement scatter.
@@ -248,7 +279,7 @@ sits at 252 kHz; it is the first run of the day and is treated as an outlier thr
 But 86.7 kHz is 1.67× worse than white noise would give, and the excess grows with N: past
 ~30 reps, averaging is nearly free of benefit.
 
-The spectrum says why — the noise is **white above ~10 Hz at ~164 nT/√Hz** (no 60 Hz line,
+The spectrum says why — the noise is **white above ~10 Hz at ~165 nT/√Hz** (no 60 Hz line,
 no discrete tones) with excess power only below 10 Hz
 ([`tables/noise_psd.csv`](tables/noise_psd.csv)). A 23-rep batch spans 9.8 ms, so batches are
 correlated through that sub-10 Hz drift.
@@ -433,7 +464,7 @@ Changes made against this analysis, one commit each.
 
 | Change | Effect |
 |---|---|
-| `readout_integration_tus` 213 → **120** | **~140 Hz** at 23 reps, up from ~87 Hz, at no sensitivity cost (§3.1) |
+| `readout_integration_tus` 213 → **120** | **~140 Hz** at 23 reps, up from ~87 Hz, at no sensitivity cost — η 188 vs 192 nT/√Hz, inside the ±14 scatter (§3.1) |
 | Step 4 comment block rewritten | Removed the "~10 ms fixed host overhead, FPGA work is free" claim, which had the split backwards |
 | 5-second save is now append-only | Byte-identical output, **10.2× cheaper** over 40k rows, flat per-flush cost instead of growing. Removes the 25–220 ms stalls and the 267 ms burst break |
 | `LIVE_PAIR_ORDER`, `LIVE_RESET_TPROC` | Ordering and tProc-stop control; reset defaults on in burst mode, off in averaged mode |
@@ -478,7 +509,7 @@ These checks need the RFSoC, and each has a number that decides pass or fail.
 | 2 | Per-RPC budget | `python scripts/profile_twopoint_acquire.py` | FPGA ≈ 86% of the batch, host 0.3–2.4 ms. Paste `measured_rpc_breakdown.csv` into §2.2 |
 | 3 | Rate model holds | same run, section 3 of its output | measured/predicted ≈ 1.0 at reps ≥ 100; confirms the corrected `time_per_rep()` |
 | 4 | **Burst mode is fixed** | 10 s burst run, `LIVE_BURST_MODE = True` | `prog_live.n_stale_acquires == 0` (was ~50% of batches), and no row-0 transient |
-| 5 | New readout window | 30 s run at τ = 120 µs, 23 reps | **≥ 135 Hz** median, σ(Δf) no worse than the current ~94 kHz |
+| 5 | New readout window | 30 s run at τ = 120 µs, 23 reps | **≥ 135 Hz** median, σ(Δf) no worse than the current ~94 kHz. This also settles the constant-`reps` assumption in §3.1 |
 | 6 | ABBA A/B | two 30 s runs, `LIVE_PAIR_ORDER` = `"forward"` then `"abba"` at 23 / 46 reps so the averaging matches | abba σ(Δf) ≤ forward σ(Δf); report both |
 | 7 | **1 kHz streaming** | Step 4b, `STREAM_TARGET_HZ = 1000` | ≥ 1.0 kHz sustained, `time_s` monotonic with uniform spacing, duty cycle near 100% |
 

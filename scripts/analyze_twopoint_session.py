@@ -237,7 +237,45 @@ def _lorentzian_dip(f, amplitude, centre, fwhm, baseline):
     return baseline - amplitude / (1.0 + ((f - centre) / (fwhm / 2.0)) ** 2)
 
 
-def analyse_integration_time(session: Path,
+def calibrate_sweep_reps(session: Path, integ: pd.DataFrame,
+                         tau_ref: float = 213.0) -> dict:
+    """Recover how many reps each ODMR sweep point averaged, from the burst runs.
+
+    The sweep CSVs do not record `reps`, and the file timestamps cannot supply it.
+    But the burst runs measure a genuine single-rep sigma(delta_f) at tau = 213 us,
+    which is one of the scanned windows. Averaging N reps reduces sigma by sqrt(N)
+    for white noise, so
+
+        sweep_reps = (sigma_1rep / sigma_sweep)^2   at the same tau
+
+    Returns the inferred rep count and the two sigmas it came from, so the caller
+    can show the inference rather than assert it.
+    """
+    row = integ[integ["tau_us"] == tau_ref]
+    if row.empty:
+        return {}
+
+    sigmas = []
+    for path in qc_find_burst_paths(session):
+        df = pd.read_csv(path)
+        table = qc.batch_table(df)
+        keep = ~qc.stale_sample_mask(df, table) & ~qc.first_sample_mask(df)
+        vals = df["peak_shift_kHz"].to_numpy(float)[keep]
+        vals = vals[np.isfinite(vals)]
+        if vals.size > 100:
+            sigmas.append(float(vals.std()))
+    if not sigmas:
+        return {}
+
+    sigma_1rep = float(np.median(sigmas))
+    sigma_sweep = float(row.iloc[0]["sigma_df_khz"])
+    ratio = sigma_1rep / sigma_sweep
+    return {"tau_ref": tau_ref, "sigma_1rep_khz": sigma_1rep,
+            "sigma_sweep_khz": sigma_sweep, "ratio": ratio,
+            "sweep_reps": ratio ** 2, "n_burst_runs": len(sigmas)}
+
+
+def analyse_integration_time(session: Path, sweep_reps: float = 1.0,
                              fit_lo: float = 2840.0, fit_hi: float = 2900.0,
                              off_lo: float = 2820.0, off_hi: float = 2980.0
                              ) -> pd.DataFrame:
@@ -247,14 +285,35 @@ def analyse_integration_time(session: Path,
     from the point-to-point scatter of the off-resonance wings (outside
     [off_lo, off_hi]), where successive differences are pure measurement noise.
 
-    The reported figure of merit is the per-rep sensitivity
+    sigma(delta_f) = sqrt(2) * sigma_z / (2 * max_slope): two parked points on
+    opposite flanks, each carrying independent noise sigma_z, differenced and
+    divided by the combined slope.
 
-        eta = sigma(delta_f) * sqrt(t_rep)
+    Turning that into a sensitivity needs BOTH time dependencies, not one:
 
-    with sigma(delta_f) = sqrt(2) * sigma_z / (2 * max_slope): two parked points
-    on opposite flanks, each carrying independent noise sigma_z, differenced and
-    divided by the combined slope. Lower eta is better, and because eta already
-    contains the time cost it is directly comparable across readout windows.
+      1. sigma_z falls with tau, because a longer window integrates more photons.
+         That is already in the measured data.
+      2. A sample costs time proportional to tau, so a longer window buys fewer
+         samples per second. That enters as sqrt(time per sample).
+
+    The trap is which *time per sample* pairs with the measured sigma_z. Each ODMR
+    sweep point is an average over `sweep_reps` reps, so its sigma_z corresponds to
+    `sweep_reps * t_rep` of integration, not to one rep. Pairing a reps-averaged
+    sigma with a single-rep time understates eta by sqrt(sweep_reps) -- a factor of
+    ~10 here. So:
+
+        eta_per_rep = sigma(delta_f) * sqrt(sweep_reps) * sqrt(t_rep)
+
+    `sweep_reps` is not recorded in the sweep CSVs and cannot be recovered from file
+    timestamps (those gaps are dominated by how fast the operator clicked, not by
+    acquisition time: the median gap is 4 s while t_point varies 4x). It is instead
+    cross-calibrated against the burst runs, which measure a true single-rep sigma at
+    tau = 213 us -- see `calibrate_sweep_reps`.
+
+    Note that `eta_relative`, and the shape of the eta curve, are unaffected by
+    sweep_reps ONLY IF it was held constant across the tau scan. That is the natural
+    reading of a controlled one-variable scan, but it is an assumption, not a
+    measurement, and the flat-band conclusion rests on it.
     """
     from scipy.optimize import curve_fit
 
@@ -317,8 +376,15 @@ def analyse_integration_time(session: Path,
     # per frequency. relax_delay_treg = 1000 -> 2.33 us on this tProc clock.
     relax_us = 2.33
     per_sweep["t_rep_us"] = 2 * (per_sweep["tau_us"] + 2 * relax_us)
-    per_sweep["eta_nt_rthz"] = (khz_to_nt(per_sweep["sigma_df_khz"])
-                                * np.sqrt(per_sweep["t_rep_us"] * 1e-6))
+
+    # Both time dependencies, per the docstring. sqrt(sweep_reps) converts the
+    # reps-averaged sweep sigma into the single-rep sigma that pairs with t_rep;
+    # sqrt(t_rep) is the time cost of one sample. Leaving sweep_reps at 1 gives a
+    # RELATIVE figure of merit whose shape is right but whose scale is low by
+    # sqrt(sweep_reps).
+    per_sweep["eta_relative"] = (khz_to_nt(per_sweep["sigma_df_khz"])
+                                 * np.sqrt(per_sweep["t_rep_us"] * 1e-6))
+    per_sweep["eta_nt_rthz"] = per_sweep["eta_relative"] * np.sqrt(sweep_reps)
 
     out = per_sweep.groupby("tau_us").agg(
         n_sweeps=("file", "size"),
@@ -328,6 +394,7 @@ def analyse_integration_time(session: Path,
         max_slope_per_mhz=("max_slope_per_mhz", "median"),
         sigma_df_khz=("sigma_df_khz", "median"),
         t_rep_us=("t_rep_us", "first"),
+        eta_relative=("eta_relative", "median"),
         eta_nt_rthz=("eta_nt_rthz", "median"),
         # Sweep-to-sweep scatter at fixed tau. Without it the eta curve looks
         # like it has structure that repeat measurements do not support.
@@ -664,6 +731,9 @@ def main() -> int:
     flush = analyse_flush_stalls(paths)
     stale, profile = analyse_staleness(paths)
     integ = analyse_integration_time(session)
+    reps_cal = calibrate_sweep_reps(session, integ)
+    if reps_cal:
+        integ = analyse_integration_time(session, sweep_reps=reps_cal["sweep_reps"])
     psd, blocks, acf = analyse_noise(paths)
     common = analyse_common_mode(paths)
 
@@ -728,9 +798,19 @@ def main() -> int:
     print("C. INTEGRATION TIME")
     print("=" * 78)
     if not integ.empty:
+        if reps_cal:
+            print(f"  Sweep points are reps-averaged, and `reps` is not recorded in the CSVs.")
+            print(f"  Cross-calibrated against {reps_cal['n_burst_runs']} burst runs at "
+                  f"tau = {reps_cal['tau_ref']:.0f} us:")
+            print(f"    single-rep sigma (burst)  {reps_cal['sigma_1rep_khz']:7.1f} kHz")
+            print(f"    sweep-point sigma         {reps_cal['sigma_sweep_khz']:7.1f} kHz")
+            print(f"    ratio {reps_cal['ratio']:.2f} -> sweep averaged "
+                  f"~{reps_cal['sweep_reps']:.0f} reps per point")
+            print(f"  eta below is per-rep and includes that sqrt({reps_cal['sweep_reps']:.0f}) "
+                  f"= {np.sqrt(reps_cal['sweep_reps']):.1f}x factor.\n")
         print(integ[["tau_us", "n_sweeps", "contrast", "fwhm_mhz", "sigma_z",
                      "sigma_z_x_sqrt_tau", "sigma_df_khz", "t_rep_us",
-                     "eta_nt_rthz", "eta_nt_rthz_std", "rate_hz_23reps"]
+                     "eta_relative", "eta_nt_rthz", "eta_nt_rthz_std", "rate_hz_23reps"]
                     ].to_string(index=False, float_format=lambda v: f"{v:.4f}"))
 
         # The eta curve has real sweep-to-sweep scatter, so the useful statement
@@ -761,6 +841,11 @@ def main() -> int:
         if len(flat) and len(rise):
             print(f"  sigma_z*sqrt(tau): {flat.mean():.4f} below 140 us, "
                   f"{rise.mean():.4f} above -> readout stops averaging down past ~140 us")
+        print("  CAVEAT: the shape of this curve assumes `reps` was held constant across")
+        print("  the tau scan. That is the natural reading of a one-variable scan, but it")
+        print("  is not recorded and cannot be recovered from the files. A reps change")
+        print("  would distort the curve; the rig check at tau = 120 us tests the")
+        print("  conclusion directly.")
 
     print()
     print("=" * 78)
