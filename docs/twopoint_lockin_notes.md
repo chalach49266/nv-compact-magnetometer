@@ -4,6 +4,14 @@
 **Date:** April 2026  
 **Purpose:** Document the physics, timing calculations, and implementation details of the two-point lock-in modulation for preliminary magnetometry testing.
 
+> **Superseded in places (2026-08-12).** The timing model here predates the 2026-08-06
+> measurements. Two corrections matter: a rep costs `n_freqs x readout_integration_tus`
+> (the relax windows are absorbed, not serialised), and the acquisition rate is FPGA-bound,
+> not host-bound. The readout window was also moved 213 -> 120 us. See
+> [`2026-08-06_twopoint_timing/TIMING_AND_NOISE_ANALYSIS.md`](2026-08-06_twopoint_timing/TIMING_AND_NOISE_ANALYSIS.md).
+
+---
+
 ---
 
 ## 1. Background: Why Lock-In Modulation

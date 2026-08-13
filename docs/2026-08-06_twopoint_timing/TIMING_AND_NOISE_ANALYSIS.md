@@ -405,15 +405,90 @@ the 4.4 kHz.
 
 ## 6. Changelog
 
-Changes made against this analysis. Each is its own commit.
+Changes made against this analysis, one commit each.
 
-| Change | File | Rationale |
-|---|---|---|
-| *(pending)* | | |
+### `qickdawg/nvpulsing/nvaverageprogram.py`
+
+| Change | Effect |
+|---|---|
+| `config_all(..., load_pulses=)` → `load_envelopes=` | Stops the `TypeError` raised on every acquire (§4.3) |
+| new `reset_tproc=` argument on `acquire()` | Lets a caller force the tProc stop that `reset=False` skips on tProc v1 |
+| silent `except TypeError` now warns | A future signature drift will be visible instead of silently degrading |
+
+`load_mem=True` was kept deliberately: the original `load_mem=False` never took effect, so
+`True` is what has actually been running. `reset_tproc` defaults to `False`, so
+`Lockin_module` and `ODMR_module` are unaffected.
+
+### `notebook_modules/multipoint_lockin_program.py`
+
+| Change | Effect |
+|---|---|
+| `time_per_rep()` no longer adds the relax windows | Predicts **87.7 Hz** at the old operating point against **87.5 Hz** measured (was 435.3 µs/rep against 424.8 measured) |
+| `predicted_rate_hz()`, `describe_timing()` | A run prints its achievable rate before it starts |
+| `multipoint_pair_order = "abba"` | Cancels linear common-mode drift between the parked points. Under a 0.5/slot drift, forward reports B−A = 10.5 against a truth of 10.0; abba reports 10.0. Free at equal averaging: 23 abba reps and 46 forward reps are both 79.1 Hz |
+| freshness guard in `acquire()` | Flags a buffer identical to the previous call into `n_stale_acquires`; policy `warn`/`raise`/`ignore` |
+| `stream()`, `stream_headroom()` | One configuration, one tProc start, continuous polling — the 1 kHz path (§4.4) |
+
+### `Modules/Twopoint_Lockin_module.ipynb`
+
+| Change | Effect |
+|---|---|
+| `readout_integration_tus` 213 → **120** | **~140 Hz** at 23 reps, up from ~87 Hz, at no sensitivity cost (§3.1) |
+| Step 4 comment block rewritten | Removed the "~10 ms fixed host overhead, FPGA work is free" claim, which had the split backwards |
+| 5-second save is now append-only | Byte-identical output, **10.2× cheaper** over 40k rows, flat per-flush cost instead of growing. Removes the 25–220 ms stalls and the 267 ms burst break |
+| `LIVE_PAIR_ORDER`, `LIVE_RESET_TPROC` | Ordering and tProc-stop control; reset defaults on in burst mode, off in averaged mode |
+| end-of-run freshness report | A run says outright whether any batch was a replay |
+| **new Step 4b — streaming cell** | `STREAM_TARGET_HZ` averages whole reps on the host to hit a target rate (1 kHz = 4 reps at τ=120 µs). Auto-zero runs before the stream so the whole file shares one zero |
+
+### New scripts
+
+| Script | Purpose |
+|---|---|
+| `scripts/analyze_twopoint_session.py` | Regenerates every number and figure in this document |
+| `scripts/profile_twopoint_acquire.py` | Rig-side per-RPC timing; `--check-only` verifies the `config_all` defect anywhere |
+| `scripts/clean_burst_lockin.py` | Salvages burst runs already recorded (§5) |
+| `notebook_modules/burst_qc.py` | Shared stale-batch, cadence and segment logic, so the analysis and the cleaner cannot disagree |
+
+### Measured effect of the cleaner
+
+On the three 2026-08-06 burst runs:
+
+| | `_145051` | `_142443` | `_145144` |
+|---|---:|---:|---:|
+| stale batches removed | 23/44 (52%) | 33/66 (50%) | 7/14 (50%) |
+| row-0 transients removed | 44 | 66 | 14 |
+| samples above +1200 kHz | 17 → **0** | — | — |
+| peak-to-peak (kHz) | 3509 → **2276** | 4518 → **2330** | 5012 → **3031** |
+| recorded → real rate (Hz) | 4421 → **2108** | 4182 → **2087** | 4455 → **2225** |
+| timestamp spacing | 11 µs–267 ms → **uniform 425.4 µs** | | |
+
+Standard deviation barely moves (259 → 255 kHz on `_145051`) because the artefacts are
+huge but rare. Peak-to-peak is the honest indicator, and the report prints both.
 
 ---
 
-## 7. Reproducing this
+## 7. Verifying on the rig
+
+Everything above is measured offline from saved CSVs, except the per-RPC split in §2.2.
+These checks need the RFSoC, and each has a number that decides pass or fail.
+
+| # | Check | Command | Pass criterion |
+|---|---|---|---|
+| 1 | `config_all` defect is gone | `python scripts/profile_twopoint_acquire.py --check-only` | Reports OK, not MISMATCH |
+| 2 | Per-RPC budget | `python scripts/profile_twopoint_acquire.py` | FPGA ≈ 86% of the batch, host 0.3–2.4 ms. Paste `measured_rpc_breakdown.csv` into §2.2 |
+| 3 | Rate model holds | same run, section 3 of its output | measured/predicted ≈ 1.0 at reps ≥ 100; confirms the corrected `time_per_rep()` |
+| 4 | **Burst mode is fixed** | 10 s burst run, `LIVE_BURST_MODE = True` | `prog_live.n_stale_acquires == 0` (was ~50% of batches), and no row-0 transient |
+| 5 | New readout window | 30 s run at τ = 120 µs, 23 reps | **≥ 135 Hz** median, σ(Δf) no worse than the current ~94 kHz |
+| 6 | ABBA A/B | two 30 s runs, `LIVE_PAIR_ORDER` = `"forward"` then `"abba"` at 23 / 46 reps so the averaging matches | abba σ(Δf) ≤ forward σ(Δf); report both |
+| 7 | **1 kHz streaming** | Step 4b, `STREAM_TARGET_HZ = 1000` | ≥ 1.0 kHz sustained, `time_s` monotonic with uniform spacing, duty cycle near 100% |
+
+Check 4 is the one that decides whether §4.3 was the whole story. If stale batches persist
+after the fix, the freshness guard will say so, and the streaming path (check 7) is the
+route that avoids the race by construction rather than by repair.
+
+---
+
+## 8. Reproducing this
 
 ```bash
 # All offline analysis: tables + figures (no hardware)
