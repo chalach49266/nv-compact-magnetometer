@@ -4,11 +4,19 @@
 **Date:** April 2026  
 **Purpose:** Document the physics, timing calculations, and implementation details of the two-point lock-in modulation for preliminary magnetometry testing.
 
-> **Superseded in places (2026-08-12).** The timing model here predates the 2026-08-06
-> measurements. Two corrections matter: a rep costs `n_freqs x readout_integration_tus`
-> (the relax windows are absorbed, not serialised), and the acquisition rate is FPGA-bound,
-> not host-bound. The readout window was also moved 213 -> 120 us. See
-> [`2026-08-06_twopoint_timing/TIMING_AND_NOISE_ANALYSIS.md`](2026-08-06_twopoint_timing/TIMING_AND_NOISE_ANALYSIS.md).
+> **Superseded in places (2026-08-17).** The timing model here predates the 2026-08-06 and
+> 2026-08-14 measurements. Three corrections matter:
+>
+> 1. a rep costs `n_slots x readout_integration_tus` — the relax windows are absorbed, not
+>    serialised;
+> 2. the acquisition rate is **host-bound**, not FPGA-bound: `acquire()` costs ~10-11.4 ms
+>    per call whatever the program does, so the averaged mode sits near 88 Hz at any readout
+>    window. (A note here previously said the opposite, following the 2026-08-06 analysis;
+>    that conclusion is retracted.)
+> 3. the readout window was moved 213 -> 120 µs, which is correct for sensitivity but bought
+>    no rate, for the reason in (2).
+>
+> See [`2026-08-14_twopoint_methods/TWOPOINT_METHODS_AND_TIMING.md`](2026-08-14_twopoint_methods/TWOPOINT_METHODS_AND_TIMING.md).
 
 ---
 

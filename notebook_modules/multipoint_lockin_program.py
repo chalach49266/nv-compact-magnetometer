@@ -35,8 +35,8 @@ Three ways to get data out, in increasing order of rate:
                               so no replay, no duty-cycle hole, and timestamps that
                               follow the FPGA cadence exactly. Delivered 1041.7 Hz with
                               zero dropped reps on 2026-08-14. **Open defect:** its
-                              broadband noise floor measured 4.2x the burst floor at the
-                              same tau, flat across 10-500 Hz. Unresolved -- see
+                              broadband noise floor measured ~6x the cleaned burst floor
+                              at the same tau, flat across 10-500 Hz. Unresolved -- see
                               `stream()` and the interleaved A/B in
                               scripts/profile_twopoint_acquire.py.
 
@@ -658,7 +658,7 @@ class MultipointLockinODMR(NVAveragerProgram):
         # That matters because the streaming path is measurably noisier than the
         # burst path on the same hardware at the same tau: on 2026-08-14, ten
         # minutes apart with nothing changed on the bench, the stream's amplitude
-        # spectral density was 4.2x the burst's, flat across 10-500 Hz, with no
+        # spectral density was 5.3-6.3x the burst's, flat across 10-500 Hz, with no
         # lines, no drift and no packet-boundary structure. A flat multiplicative
         # excess like that is what a readout-path difference looks like rather
         # than a physical one, and this was the only difference in the path.

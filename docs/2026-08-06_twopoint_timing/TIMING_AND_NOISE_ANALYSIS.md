@@ -228,7 +228,7 @@ Using the (superseded) model `period ≈ reps × n_freqs × τ + 1.6 ms`:
 stronger: the per-call cost is ~10 ms, not 1.6 ms, so a 1 ms period is unreachable by a wide
 margin with one call per sample. It needs a single `start_readout` with continuous polling
 (§4.4). That was built, and on 2026-08-14 it delivered **1041.7 Hz** as designed — though at
-a noise floor 4.2× worse than burst mode, which is a separate open defect.
+a noise floor ~6× worse than burst mode, which is a separate open defect.
 
 ---
 

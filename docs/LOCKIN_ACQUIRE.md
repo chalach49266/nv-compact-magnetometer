@@ -2,11 +2,18 @@
 
 This doc explains how `Modules/Lockin_module.ipynb` and `notebook_modules/multipoint_lockin_program.py` measure 16 parked frequencies in one FPGA program upload, and why that is roughly 5 s faster per shot than the naive per-frequency loop.
 
-> **See also (2026-08-12).** The per-acquire timing budget, the burst-mode stale-buffer
-> defect and the streaming path that replaces it are documented in
-> [`2026-08-06_twopoint_timing/TIMING_AND_NOISE_ANALYSIS.md`](2026-08-06_twopoint_timing/TIMING_AND_NOISE_ANALYSIS.md).
-> In short: `acquire()` costs ~1.6 ms of host round-trip per call regardless of program
-> length, so anything above a few hundred Hz should use `MultipointLockinODMR.stream()`.
+> **See also (2026-08-17).** The per-acquire timing budget, the three acquisition modes and
+> their open defects are documented in
+> [`2026-08-14_twopoint_methods/TWOPOINT_METHODS_AND_TIMING.md`](2026-08-14_twopoint_methods/TWOPOINT_METHODS_AND_TIMING.md).
+> In short: `acquire()` costs **~10-11.4 ms** of host round-trip per call regardless of
+> program length, and the FPGA pulse work runs *underneath* that rather than adding to it.
+> So the averaged mode caps near 88 Hz whatever the readout window, averaging is free up to
+> the call floor, and anything faster needs `acquire(per_rep=True)` or
+> `MultipointLockinODMR.stream()`.
+>
+> (An earlier note here said ~1.6 ms, from
+> [`2026-08-06_twopoint_timing/`](2026-08-06_twopoint_timing/TIMING_AND_NOISE_ANALYSIS.md).
+> That figure was a residual under a serial model which the 2026-08-14 data disproves.)
 
 ---
 

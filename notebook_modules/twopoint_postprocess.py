@@ -15,7 +15,7 @@ single generic cleaner ends up doing the wrong thing to two of them:
     stream     one FPGA run, drained continuously, ~1 kHz. Structurally the
                cleanest -- gapless rep indices, no duplicates -- but the PL
                droops ~25% over a 30 s run because there is no duty-cycle gap,
-               and its broadband noise floor is currently ~4x the burst floor.
+               and its broadband noise floor is currently ~6x the burst floor.
 
 Every pipeline returns a `TwoPointResult`: the cleaned frame, a flat report dict
 suitable for a CSV row, and a `twopoint_spectra.SpectrumSummary`. The notebook's

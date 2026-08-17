@@ -16,7 +16,7 @@ Three targeted tests, each of which decides one open question and exits:
     --floor               S3: is the per-call cost really a ~10 ms floor, with the
                           rate flat against reps below it? (~30 s)
     --compare-read-paths  S1: interleaved burst vs stream on the SAME program.
-                          Decides whether streaming's 4.2x noise excess is the read
+                          Decides whether streaming's ~6x noise excess is the read
                           path or the environment. Run this one first. (~1 min)
     --stream-scan         S2: does the streaming excess grow with run length, i.e.
                           is the board worker losing the race as the buffer fills?
@@ -289,7 +289,7 @@ def _floor_and_sigma(block: np.ndarray, cadence_s: float, band=(10.0, None)) -> 
 def compare_read_paths(freqs_mhz, tau_us: float, reps: int, n_pairs: int) -> pd.DataFrame:
     """S1 -- the decisive test for the streaming noise excess.
 
-    On 2026-08-14 the streamed data measured 4.2x the burst amplitude spectral
+    On 2026-08-14 the streamed data measured 5.3-6.3x the burst amplitude spectral
     density at the same tau, flat across 10-500 Hz, ten minutes apart with nothing
     changed on the bench. Two explanations survive: the read path differs, or the
     room got quieter in between. Ten minutes is long enough for the second to be
@@ -299,7 +299,7 @@ def compare_read_paths(freqs_mhz, tau_us: float, reps: int, n_pairs: int) -> pd.
     burst / stream / burst / stream within a few seconds. Identical FPGA work; only
     the way the host takes the data out differs.
 
-        ratio ~ 1.0   the read paths agree -- the 4.2x was the environment
+        ratio ~ 1.0   the read paths agree -- the ~6x was the environment
         ratio >> 1    streaming really is noisier, and it is a software defect
     """
     prog = build_program(freqs_mhz, tau_us, reps)
@@ -354,7 +354,7 @@ def compare_read_paths(freqs_mhz, tau_us: float, reps: int, n_pairs: int) -> pd.
         print(f"                   PL level   {r_level:6.2f}x")
         print()
         if r_floor < 1.25:
-            print("  VERDICT: the read paths agree. The 4.2x seen on 2026-08-14 was the")
+            print("  VERDICT: the read paths agree. The ~6x seen on 2026-08-14 was the")
             print("  environment changing between the two runs, not a streaming defect.")
             print("  Streaming is then the preferred high-rate path with no caveat.")
         else:
