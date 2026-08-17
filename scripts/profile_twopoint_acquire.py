@@ -4,12 +4,22 @@
 Run this ON THE RIG (the machine that can reach the RFSoC). Everything else in
 the analysis is derived offline from saved CSVs, but the split between FPGA pulse
 work and host round-trips can only be measured live, one RPC at a time. This
-script fills section 2.2 of
-`docs/2026-08-06_twopoint_timing/TIMING_AND_NOISE_ANALYSIS.md`.
+script fills section 3.2 of
+`docs/2026-08-14_twopoint_methods/TWOPOINT_METHODS_AND_TIMING.md`.
 
     python scripts/profile_twopoint_acquire.py --check-only        # no hardware
     python scripts/profile_twopoint_acquire.py --ip 192.168.0.103
     python scripts/profile_twopoint_acquire.py --reps 1 4 23 100 --tau 120 213
+
+Three targeted tests, each of which decides one open question and exits:
+
+    --floor               S3: is the per-call cost really a ~10 ms floor, with the
+                          rate flat against reps below it? (~30 s)
+    --compare-read-paths  S1: interleaved burst vs stream on the SAME program.
+                          Decides whether streaming's 4.2x noise excess is the read
+                          path or the environment. Run this one first. (~1 min)
+    --stream-scan         S2: does the streaming excess grow with run length, i.e.
+                          is the board worker losing the race as the buffer fills?
 
 What it does
 ------------
@@ -44,7 +54,7 @@ import pandas as pd
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "notebook_modules"))
 
-DEFAULT_OUTDIR = REPO_ROOT / "docs" / "2026-08-06_twopoint_timing" / "tables"
+DEFAULT_OUTDIR = REPO_ROOT / "docs" / "2026-08-14_twopoint_methods" / "tables"
 
 
 # ------------------------------------------------------------ static check
@@ -244,6 +254,206 @@ def default_frequencies() -> list[float]:
     return [float(cal["f_minus_mhz"]), float(cal["f_plus_mhz"])]
 
 
+# ------------------------------------------------- read-path comparison (S1)
+
+
+def _per_rep_matrix(data) -> np.ndarray:
+    """(n_reps, n_freqs) of normalised counts from an acquire/stream result."""
+    return np.atleast_2d(np.asarray(data.signal, dtype=float))
+
+
+def _floor_and_sigma(block: np.ndarray, cadence_s: float, band=(10.0, None)) -> dict:
+    """Noise of the differential and of the common mode, for one contiguous run.
+
+    Deliberately works in raw normalised counts, not in kHz: the ratio between two
+    read paths is what matters and it does not depend on the calibration, so this
+    stays valid even if the ODMR fit has moved since.
+    """
+    import twopoint_spectra as spec
+
+    diff = block[:, 1] - block[:, 0]
+    common = block[:, 0]
+    fs = 1.0 / cadence_s
+    lo, hi = band[0], (band[1] or 0.4 * fs)
+    f, psd = spec.welch_psd(diff, fs, nseg=8, detrend="linear")
+    m = (f > lo) & (f < hi)
+    return {
+        "n": int(block.shape[0]),
+        "sigma_diff": float(np.std(diff, ddof=1)),
+        "sigma_common": float(np.std(common, ddof=1)),
+        "mean_common": float(np.mean(common)),
+        "asd_floor": float(np.sqrt(np.median(psd[m]))) if m.any() else float("nan"),
+    }
+
+
+def compare_read_paths(freqs_mhz, tau_us: float, reps: int, n_pairs: int) -> pd.DataFrame:
+    """S1 -- the decisive test for the streaming noise excess.
+
+    On 2026-08-14 the streamed data measured 4.2x the burst amplitude spectral
+    density at the same tau, flat across 10-500 Hz, ten minutes apart with nothing
+    changed on the bench. Two explanations survive: the read path differs, or the
+    room got quieter in between. Ten minutes is long enough for the second to be
+    plausible, so the runs are not comparable.
+
+    This makes them comparable. The SAME program object, the same reps, alternating
+    burst / stream / burst / stream within a few seconds. Identical FPGA work; only
+    the way the host takes the data out differs.
+
+        ratio ~ 1.0   the read paths agree -- the 4.2x was the environment
+        ratio >> 1    streaming really is noisier, and it is a software defect
+    """
+    prog = build_program(freqs_mhz, tau_us, reps)
+    cadence = prog.time_per_rep()
+    print(f"  program: tau={tau_us:.1f} us, {reps} reps, cadence {cadence * 1e6:.1f} us/rep "
+          f"({1 / cadence:.0f} Hz), {reps * cadence * 1e3:.1f} ms of FPGA work per run")
+    print(f"  {n_pairs} interleaved pairs, burst first\n")
+
+    prog.acquire(progress=False)                       # warm-up, discarded
+    rows = []
+    for k in range(n_pairs):
+        prog.reset_freshness_counters()
+        t0 = perf_counter()
+        d = prog.acquire(progress=False, per_rep=True, reset_tproc=True)
+        t_burst = perf_counter() - t0
+        if d is None:
+            print(f"  pair {k}: burst came back stale on every retry, skipping")
+            continue
+        rec = _floor_and_sigma(_per_rep_matrix(d), cadence)
+        rec.update({"pair": k, "path": "burst", "wall_s": t_burst,
+                    "stale": int(prog.n_stale_acquires)})
+        rows.append(rec)
+
+        t0 = perf_counter()
+        blocks = [np.atleast_2d(np.asarray(pkt.signal, dtype=float))
+                  for pkt in prog.stream(total_reps=reps)]
+        t_stream = perf_counter() - t0
+        rec = _floor_and_sigma(np.concatenate(blocks, axis=0), cadence)
+        rec.update({"pair": k, "path": "stream", "wall_s": t_stream, "stale": 0})
+        rows.append(rec)
+
+        print(f"  pair {k}: burst sigma_diff={rows[-2]['sigma_diff']:.4g} "
+              f"floor={rows[-2]['asd_floor']:.4g}   |   "
+              f"stream sigma_diff={rows[-1]['sigma_diff']:.4g} "
+              f"floor={rows[-1]['asd_floor']:.4g}")
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        print("\n  no usable pairs -- every burst came back stale.")
+        return df
+
+    print("\n  " + "-" * 66)
+    summary = df.groupby("path")[["sigma_diff", "sigma_common", "mean_common",
+                                  "asd_floor"]].median()
+    print(summary.to_string())
+    if {"burst", "stream"} <= set(summary.index):
+        r_floor = summary.loc["stream", "asd_floor"] / summary.loc["burst", "asd_floor"]
+        r_sigma = summary.loc["stream", "sigma_diff"] / summary.loc["burst", "sigma_diff"]
+        r_level = summary.loc["stream", "mean_common"] / summary.loc["burst", "mean_common"]
+        print(f"\n  stream / burst   ASD floor  {r_floor:6.2f}x")
+        print(f"                   sigma      {r_sigma:6.2f}x")
+        print(f"                   PL level   {r_level:6.2f}x")
+        print()
+        if r_floor < 1.25:
+            print("  VERDICT: the read paths agree. The 4.2x seen on 2026-08-14 was the")
+            print("  environment changing between the two runs, not a streaming defect.")
+            print("  Streaming is then the preferred high-rate path with no caveat.")
+        else:
+            print(f"  VERDICT: streaming really is {r_floor:.1f}x noisier on identical FPGA")
+            print("  work. This is a software defect in the read path, not physics.")
+            print("  Next: does it scale with run length? Run --stream-scan.")
+    return df
+
+
+def stream_length_scan(freqs_mhz, tau_us: float, lengths) -> pd.DataFrame:
+    """S2 -- does the streaming excess grow with run length?
+
+    If the noise rises with `total_reps`, the board-side worker is losing the race
+    against the tProc as the accumulated buffer fills, and the fix is to bound the
+    poll interval. If it is flat, the excess is per-sample and the buffer is fine.
+    """
+    rows = []
+    for total in lengths:
+        prog = build_program(freqs_mhz, tau_us, int(total))
+        cadence = prog.time_per_rep()
+        try:
+            head = prog.stream_headroom()
+            headroom = f"{head['shots_that_fit']} shots ({head['seconds_that_fit']:.2f} s)"
+        except Exception as exc:
+            headroom = f"unknown ({exc})"
+        t0 = perf_counter()
+        blocks = [np.atleast_2d(np.asarray(pkt.signal, dtype=float))
+                  for pkt in prog.stream(total_reps=int(total))]
+        wall = perf_counter() - t0
+        rec = _floor_and_sigma(np.concatenate(blocks, axis=0), cadence)
+        rec.update({"total_reps": int(total), "run_s": total * cadence, "wall_s": wall,
+                    "duty_cycle": total * cadence / wall, "headroom": headroom})
+        rows.append(rec)
+        print(f"  {total:7d} reps ({total * cadence:6.2f} s): "
+              f"sigma_diff={rec['sigma_diff']:.4g}  floor={rec['asd_floor']:.4g}  "
+              f"duty={100 * rec['duty_cycle']:.0f}%  buffer fits {headroom}")
+
+    df = pd.DataFrame(rows)
+    if len(df) > 1:
+        trend = df["asd_floor"].iloc[-1] / df["asd_floor"].iloc[0]
+        print(f"\n  floor at the longest run / shortest run: {trend:.2f}x")
+        print("  -> buffer racing" if trend > 1.3 else
+              "  -> flat: the excess is per-sample, not a buffer-fill effect")
+    return df
+
+
+def measure_floor_and_flatness(freqs_mhz, tau_us: float, reps_list, n_batches: int
+                               ) -> pd.DataFrame:
+    """S3 -- confirm the per-call floor, and that the rate is flat against reps.
+
+    The offline claim is that `period = max(host_call, reps * time_per_rep)` rather
+    than a serial sum. This tests it directly: sweep reps at fixed tau and watch the
+    period stay put until the FPGA work outgrows the floor, then track it one for one.
+    """
+    from multipoint_lockin_program import MultipointLockinODMR
+
+    probe = build_program(freqs_mhz, tau_us, 1)
+    cal = MultipointLockinODMR.measure_host_floor(probe, n=max(20, n_batches), reps=1)
+    print(f"  reps=1 probe: FPGA work {cal['fpga_s'] * 1e3:.3f} ms, "
+          f"fastest call {cal['floor_s'] * 1e3:.2f} ms, median {cal['median_s'] * 1e3:.2f} ms, "
+          f"jitter {cal['jitter_s'] * 1e3:.2f} ms")
+    print(f"  -> per-call floor is {cal['floor_s'] * 1e3:.2f} ms against "
+          f"{cal['fpga_s'] * 1e3:.3f} ms of pulse work "
+          f"({cal['fpga_s'] / cal['floor_s'] * 100:.1f}% FPGA)\n")
+
+    rows = []
+    for reps in reps_list:
+        prog = build_program(freqs_mhz, tau_us, int(reps))
+        fpga_ms = prog.total_time() * 1e3
+        prog.acquire(progress=False)
+        times = []
+        for _ in range(n_batches):
+            t0 = perf_counter()
+            prog.acquire(progress=False)
+            times.append(perf_counter() - t0)
+        arr = np.asarray(times) * 1e3
+        rows.append({
+            "tau_us": tau_us, "reps": int(reps), "fpga_ms": fpga_ms,
+            "period_ms_p05": float(np.percentile(arr, 5)),
+            "period_ms_median": float(np.median(arr)),
+            "rate_hz": 1e3 / float(np.median(arr)),
+            "predicted_ms": max(cal["median_s"] * 1e3, fpga_ms),
+        })
+        print(f"  reps={reps:5d}  FPGA {fpga_ms:7.2f} ms  period {np.median(arr):7.2f} ms  "
+              f"-> {1e3 / np.median(arr):7.1f} Hz   "
+              f"(max-model predicts {max(cal['median_s'] * 1e3, fpga_ms):.2f} ms)")
+
+    df = pd.DataFrame(rows)
+    below = df[df["fpga_ms"] < cal["floor_s"] * 1e3]
+    if len(below) > 1:
+        spread = below["period_ms_median"].max() / below["period_ms_median"].min()
+        print(f"\n  across the reps whose FPGA work fits under the floor, the period varies "
+              f"by {spread:.2f}x while the FPGA work varies by "
+              f"{below['fpga_ms'].max() / below['fpga_ms'].min():.1f}x")
+        print("  -> host-bound, as the offline analysis concluded" if spread < 1.15 else
+              "  -> NOT flat; the offline conclusion does not reproduce on this rig")
+    return df
+
+
 # ------------------------------------------------------------------- main
 
 
@@ -261,6 +471,21 @@ def main() -> int:
     ap.add_argument("--freqs", type=float, nargs=2, default=None,
                     help="parked pair in MHz (default: newest calibration)")
     ap.add_argument("--outdir", type=Path, default=DEFAULT_OUTDIR)
+    ap.add_argument("--compare-read-paths", action="store_true",
+                    help="S1: interleaved burst vs stream on the same program. This is "
+                         "the test that decides whether the streaming noise excess is "
+                         "the read path or the room. ~1 minute.")
+    ap.add_argument("--stream-scan", action="store_true",
+                    help="S2: stream at several run lengths; does the noise grow with "
+                         "buffer fill?")
+    ap.add_argument("--floor", action="store_true",
+                    help="S3: measure the per-call host floor and confirm the rate is "
+                         "flat against reps below it")
+    ap.add_argument("--pairs", type=int, default=5,
+                    help="interleaved burst/stream pairs for --compare-read-paths")
+    ap.add_argument("--stream-lengths", type=int, nargs="+",
+                    default=[2000, 20000, 125000],
+                    help="run lengths in reps for --stream-scan")
     args = ap.parse_args()
 
     mismatch = report_signature_check(check_config_all_signature())
@@ -274,6 +499,34 @@ def main() -> int:
 
     freqs = args.freqs if args.freqs else default_frequencies()
     args.outdir.mkdir(parents=True, exist_ok=True)
+    tau0 = args.tau[0]
+
+    # Targeted tests run on their own and exit -- they are the ones you reach for
+    # when chasing a specific defect, and none of them needs the full profile.
+    if args.compare_read_paths or args.stream_scan or args.floor:
+        if args.floor:
+            print("=" * 78)
+            print("S3. PER-CALL FLOOR AND RATE FLATNESS")
+            print("=" * 78)
+            measure_floor_and_flatness(freqs, tau0, args.reps, args.batches).to_csv(
+                args.outdir / "measured_floor_flatness.csv", index=False)
+            print()
+        if args.compare_read_paths:
+            print("=" * 78)
+            print("S1. BURST vs STREAM, INTERLEAVED, SAME PROGRAM")
+            print("=" * 78)
+            compare_read_paths(freqs, tau0, max(args.reps), args.pairs).to_csv(
+                args.outdir / "measured_read_path_compare.csv", index=False)
+            print()
+        if args.stream_scan:
+            print("=" * 78)
+            print("S2. STREAM NOISE vs RUN LENGTH")
+            print("=" * 78)
+            stream_length_scan(freqs, tau0, args.stream_lengths).to_csv(
+                args.outdir / "measured_stream_scan.csv", index=False)
+            print()
+        print(f"tables -> {args.outdir}")
+        return 0
 
     print("=" * 78)
     print("2. PER-RPC TIMING  (tau=213 us, 23 reps -- today's operating point)")
