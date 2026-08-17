@@ -16,22 +16,33 @@ N frequencies in tight hardware sequence — same speed as a single ODMR sweep.
 
 Three ways to get data out, in increasing order of rate:
 
-    acquire()                 one averaged sample per call. The host round-trip is
-                              ~1.6 ms per call, so this caps out around 500 Hz however
-                              short the program is.
+    acquire()                 one averaged sample per call. The call costs ~10-11.4 ms
+                              of host round-trip **whatever the program does**, and the
+                              FPGA work runs underneath it rather than adding to it, so
+                              this caps out near 88 Hz and no readout-window change
+                              moves it. The flip side is that averaging is free up to
+                              that budget -- see `reps_that_fit()`.
     acquire(per_rep=True)     one call returns every rep as its own time sample
-                              ("burst"). Faster, but it re-arms the accumulated buffer
-                              once per burst, and if a run is still in flight when the
-                              next one is configured the readout can return the previous
-                              run's contents. Guarded by the freshness check in
-                              `acquire`; needs `reset_tproc=True`.
+                              ("burst"), so the host cost is paid once per burst instead
+                              of once per sample. Fast, but it re-arms the accumulated
+                              buffer once per burst and roughly half the calls come back
+                              as a bit-identical replay of the previous one. Forcing the
+                              tProc stop does **not** fix it (tried 2026-08-14: still
+                              50.0% replays). Set `cfg.multipoint_on_stale = "drop"` so
+                              the guard discards them instead of recording duplicates.
     stream()                  one configuration, one tProc start, then nothing but
                               draining the streamer queue. No per-batch reconfiguration,
-                              so no race, no duty-cycle hole, and timestamps that follow
-                              the FPGA cadence exactly. This is the path to 1 kHz+.
+                              so no replay, no duty-cycle hole, and timestamps that
+                              follow the FPGA cadence exactly. Delivered 1041.7 Hz with
+                              zero dropped reps on 2026-08-14. **Open defect:** its
+                              broadband noise floor measured 4.2x the burst floor at the
+                              same tau, flat across 10-500 Hz. Unresolved -- see
+                              `stream()` and the interleaved A/B in
+                              scripts/profile_twopoint_acquire.py.
 
-See docs/2026-08-06_twopoint_timing/TIMING_AND_NOISE_ANALYSIS.md for the measurements
-behind those statements.
+See docs/2026-08-14_twopoint_methods/TWOPOINT_METHODS_AND_TIMING.md for the measurements
+behind those statements, and docs/2026-08-06_twopoint_timing/ for the earlier analysis
+whose timing conclusion this one corrects.
 """
 
 from __future__ import annotations
@@ -93,9 +104,14 @@ class MultipointLockinODMR(NVAveragerProgram):
             same number of readouts -- the drift cancellation is free, paid for in
             rep count rather than in time.
 
-        multipoint_on_stale : {"warn", "raise", "ignore"}, default "warn"
+        multipoint_on_stale : {"warn", "drop", "raise", "ignore"}, default "warn"
             What to do when an acquire returns a buffer bit-identical to the previous
-            one. See `acquire`.
+            one. "drop" retries and then returns None so the caller can skip the
+            batch -- the right setting for burst mode, where ~50% of calls replay.
+            See `acquire`.
+
+        multipoint_stale_retries : int, default 2
+            Re-acquire attempts before the "drop" policy gives up on a batch.
     """
 
     required_cfg = [
@@ -235,7 +251,8 @@ class MultipointLockinODMR(NVAveragerProgram):
             self.wait_all()
             self.sync_all(self.cfg.relax_delay_treg)
 
-    def acquire(self, raw_data=False, per_rep=False, *args, **kwargs):
+    def acquire(self, raw_data=False, per_rep=False, stale_retries=None,
+                *args, **kwargs):
         """Run the program once and return the parked-frequency results.
 
         Also checks that the board actually gave us new data. `qick` reads the
@@ -243,26 +260,55 @@ class MultipointLockinODMR(NVAveragerProgram):
         flight when the next one is configured, the readout can return the previous
         run's contents. On the 2026-08-06 burst data that happened on every second
         call -- 95.7% of the rows identical to the batch before, at 13 ms instead of
-        425 ms -- and half of every burst run was silently a replay.
+        425 ms -- and half of every burst run was silently a replay. **It still
+        happens**: the 2026-08-14 run, taken with the corrected `config_all` and
+        `reset_tproc=True`, replayed exactly 50.0% of its batches (185/371). So
+        forcing the tProc stop is not the cure and the guard is not optional.
 
         The check is a byte comparison against the previous raw buffer, so it costs
-        microseconds and catches the failure whatever its mechanism. `n_stale_acquires`
-        counts hits; `cfg.multipoint_on_stale` chooses "warn" (default, reports the
-        first few), "raise", or "ignore".
+        microseconds and catches the failure whatever its mechanism.
+        `n_stale_acquires` counts hits; `cfg.multipoint_on_stale` chooses:
+
+            "warn"   (default) report the first few and return the data anyway
+            "drop"   re-acquire up to `stale_retries` times; return None if every
+                     attempt is stale, so the caller can skip the batch instead of
+                     writing a duplicate into the CSV
+            "raise"  stop the run
+            "ignore" no check at all
+
+        `stale_retries` defaults to `cfg.multipoint_stale_retries` (2).
+
+        Returns None only under the "drop" policy, when every attempt came back
+        stale. Callers in a loop should treat that as "skip this batch".
         """
         n_slots = len(self.emission_order())
         per_freq = 1 if getattr(self.cfg, "multipoint_skip_reference", False) else 2
-        data = super().acquire(readouts_per_experiment=per_freq * n_slots, *args, **kwargs)
+        readouts = per_freq * n_slots
 
-        self._check_freshness(data)
+        policy = str(getattr(self.cfg, "multipoint_on_stale", "warn")).lower()
+        if stale_retries is None:
+            stale_retries = int(getattr(self.cfg, "multipoint_stale_retries", 2))
+        attempts = (int(stale_retries) + 1) if policy == "drop" else 1
+
+        data = None
+        for attempt in range(attempts):
+            data = super().acquire(readouts_per_experiment=readouts, *args, **kwargs)
+            if not self._check_freshness(data):
+                break
+            # Stale. Under "drop" we try again; the race is transient, so a repeat
+            # call usually lands on a completed run.
+            self.n_stale_dropped += 1
+            if attempt == attempts - 1 and policy == "drop":
+                return None
 
         if raw_data is False:
             data = self.analyze_results(data, per_rep=per_rep)
 
         return data
 
-    # Set by _check_freshness; read it after a run to see whether any batch was a replay.
-    n_stale_acquires = 0
+    # Set by _check_freshness; read them after a run to see how much was a replay.
+    n_stale_acquires = 0     # buffers that repeated the previous one
+    n_stale_dropped = 0      # of those, ones the "drop" policy discarded or retried
     _previous_digest = None
     _stale_warnings_emitted = 0
 
@@ -273,33 +319,40 @@ class MultipointLockinODMR(NVAveragerProgram):
         auto-zero -- do not contribute to the count the run is judged on.
         """
         self.n_stale_acquires = 0
+        self.n_stale_dropped = 0
         self._previous_digest = None
         self._stale_warnings_emitted = 0
 
     def _check_freshness(self, data):
-        """Flag an acquire whose raw buffer repeats the previous one exactly."""
+        """Flag an acquire whose raw buffer repeats the previous one exactly.
+
+        Returns True if this buffer is a replay of the previous one.
+        """
         policy = str(getattr(self.cfg, "multipoint_on_stale", "warn")).lower()
         if policy == "ignore":
-            return
+            return False
 
         digest = hashlib.blake2b(np.ascontiguousarray(data).tobytes(), digest_size=16).digest()
-        if digest == self._previous_digest:
+        stale = digest == self._previous_digest
+        if stale:
             self.n_stale_acquires += 1
             message = (
                 f"acquire() returned a buffer identical to the previous call "
                 f"(stale count {self.n_stale_acquires}). The accumulated buffer was read "
-                f"before the new run refilled it. Pass reset_tproc=True, or use stream() "
-                f"for high-rate acquisition."
+                f"before the new run refilled it. reset_tproc=True does NOT fix this -- "
+                f"it was tried on 2026-08-14 and 50% of batches still replayed. Set "
+                f"cfg.multipoint_on_stale='drop' to discard them, or use stream()."
             )
             if policy == "raise":
                 raise RuntimeError(message)
-            if self._stale_warnings_emitted < 3:
+            if policy != "drop" and self._stale_warnings_emitted < 3:
                 self._stale_warnings_emitted += 1
                 print(f"  WARNING: {message}")
                 if self._stale_warnings_emitted == 3:
                     print("  (further stale-batch warnings suppressed; "
                           "check prog.n_stale_acquires at the end of the run)")
         self._previous_digest = digest
+        return stale
 
     def analyze_results(self, data, per_rep=False):
         """Reshape and split into per-frequency signal/reference arrays.
@@ -416,22 +469,112 @@ class MultipointLockinODMR(NVAveragerProgram):
         """Seconds of FPGA pulse work in one acquire (all reps)."""
         return self.time_per_rep() * self.cfg.reps
 
-    # Host round-trip per acquire() call, measured on 2026-08-06: batch period
-    # 11.37 ms against 9.77 ms of FPGA work at 23 reps. It is charged per CALL,
-    # which is why it, not the FPGA, sets the ceiling for small rep counts.
-    HOST_OVERHEAD_S = 1.6e-3
+    # Per-CALL floor of acquire(), measured across three sessions. This used to be
+    # HOST_OVERHEAD_S = 1.6e-3 under a serial `period = host + FPGA` model, which
+    # the 2026-08-14 data disproves:
+    #
+    #   session   FPGA readout   fastest call   median period
+    #   08-06        9.80 ms       10.2 ms        11.38 ms
+    #   08-06        4.26 ms        9.4 ms        10.25 ms
+    #   08-14        5.52 ms       10.3 ms        11.38 ms
+    #   08-14        2.40 ms       10.1 ms        11.34 ms
+    #
+    # A 4x change in FPGA work moves the period by ~1 ms, and the fastest call is
+    # ~10 ms even when only 2.40 ms of FPGA work was requested. So the host chain
+    # is ~10 ms and the FPGA work runs underneath it -- free until it exceeds the
+    # floor. Two consequences that reverse the old advice:
+    #
+    #   * shortening tau does not raise the averaged-mode rate, at any tau;
+    #   * reps is FREE up to the floor, so under-filling it wastes sensitivity.
+    #
+    # Two numbers, because the host cost is a distribution and the two uses want
+    # different ends of it:
+    #
+    #   HOST_CALL_S   the TYPICAL call. Predicts the rate. 11.4 ms reproduces the
+    #                 measured 87.5 Hz at tau=213/23 reps and 87.8 Hz at
+    #                 tau=120/23 reps -- the same answer for both, which is the
+    #                 whole point.
+    #   HOST_FLOOR_S  the FASTEST call observed. Sizes the free averaging: fill
+    #                 past this and even the quickest calls become FPGA-bound.
+    #
+    # These are rig- and session-dependent -- the 2026-08-04/06 sessions ran a
+    # ~10.25 ms typical call (94.9 Hz) against 11.4 ms on 2026-08-14. Calibrate
+    # with measure_host_floor() at the start of a session rather than trusting
+    # these defaults, which are simply the most recent measurement.
+    HOST_CALL_S = 11.4e-3
+    HOST_FLOOR_S = 10.1e-3
 
-    def predicted_rate_hz(self, reps=None, host_overhead_s=None):
+    # Kept as an alias so older notebooks that print it still import. It used to
+    # be 1.6e-3 under the disproved serial model.
+    HOST_OVERHEAD_S = HOST_CALL_S
+
+    def predicted_rate_hz(self, reps=None, host_call_s=None):
         """Samples per second this configuration can sustain in averaged mode.
 
-        One acquire yields one averaged sample, so the rate is
-        1 / (reps * time_per_rep + host_overhead). Use this before a run to check
-        that the operating point does what you expect -- the readout window is the
-        dominant term and it is easy to pick one that quietly costs half the rate.
+        `period = max(host_call, reps * time_per_rep)`. The two terms overlap
+        rather than adding, so the rate is flat against `reps` until the FPGA work
+        outgrows the host call and only then falls.
         """
         reps = int(self.cfg.reps if reps is None else reps)
-        overhead = self.HOST_OVERHEAD_S if host_overhead_s is None else host_overhead_s
-        return 1.0 / (reps * self.time_per_rep() + overhead)
+        call = self.HOST_CALL_S if host_call_s is None else float(host_call_s)
+        return 1.0 / max(call, reps * self.time_per_rep())
+
+    def reps_that_fit(self, host_floor_s=None):
+        """Largest rep count whose FPGA work still hides under the per-call floor.
+
+        Averaging this many reps costs nothing in rate. Running fewer is pure
+        loss: the call takes the same wall-clock time either way, so the unused
+        milliseconds are photons not collected. On 2026-08-14 the runs used 10
+        reps at tau = 120 us -- 2.40 ms of a ~10 ms budget, so ~4x the averaging
+        was available for free.
+
+        Sized against the *fastest* call rather than the typical one, so that
+        filling the budget does not make the quick calls FPGA-bound and drag the
+        rate down.
+        """
+        floor = self.HOST_FLOOR_S if host_floor_s is None else float(host_floor_s)
+        per_rep = self.time_per_rep()
+        return max(1, int(floor / per_rep)) if per_rep > 0 else 1
+
+    @staticmethod
+    def measure_host_floor(program=None, n=20, reps=1):
+        """Measure the per-call floor on this rig, in seconds.
+
+        Runs `n` acquires of a deliberately tiny program: with `reps=1` the FPGA
+        work is a few hundred microseconds, so whatever the call still costs is
+        the host chain. Takes about `n * floor` seconds -- a fifth of a second for
+        the default.
+
+        Returns a dict with the 5th percentile (the cleanest estimate of the
+        floor, since jitter only ever adds), the median and the spread.
+        """
+        from copy import copy
+
+        if program is None:
+            raise ValueError("measure_host_floor needs a configured program to clone")
+
+        cfg = copy(program.cfg)
+        cfg.reps = int(reps)
+        probe = type(program)(cfg)
+
+        times = []
+        probe.acquire(progress=False)          # discard the first, it warms caches
+        for _ in range(int(n)):
+            t0 = _perf_counter()
+            probe.acquire(progress=False)
+            times.append(_perf_counter() - t0)
+
+        times = np.asarray(times, dtype=float)
+        fpga = probe.time_per_rep() * cfg.reps
+        return {
+            "n": int(n),
+            "reps": int(reps),
+            "fpga_s": float(fpga),
+            "floor_s": float(np.percentile(times, 5)),
+            "median_s": float(np.median(times)),
+            "p95_s": float(np.percentile(times, 95)),
+            "jitter_s": float(np.percentile(times, 95) - np.percentile(times, 5)),
+        }
 
     def stream(self, duration_s=None, total_reps=None, poll_timeout_s=10.0,
                progress=False):
@@ -504,11 +647,31 @@ class MultipointLockinODMR(NVAveragerProgram):
                 f"run length, and it cannot be changed after compilation."
             )
 
+        # --- Configuration sequence.
+        #
+        # This deliberately mirrors NVAveragerProgram.acquire() step for step, so
+        # that the only difference between the two paths is what happens in the
+        # polling loop below. It did not, before 2026-08-16: `reload_mem()` was
+        # missing entirely and `config_bufs` ran after `start_src` rather than
+        # before `reload_mem`.
+        #
+        # That matters because the streaming path is measurably noisier than the
+        # burst path on the same hardware at the same tau: on 2026-08-14, ten
+        # minutes apart with nothing changed on the bench, the stream's amplitude
+        # spectral density was 4.2x the burst's, flat across 10-500 Hz, with no
+        # lines, no drift and no packet-boundary structure. A flat multiplicative
+        # excess like that is what a readout-path difference looks like rather
+        # than a physical one, and this was the only difference in the path.
+        #
+        # Whether it is THE cause is not established -- it needs the interleaved
+        # burst/stream A/B in scripts/profile_twopoint_acquire.py --compare-read-paths.
+        # Aligning the sequences costs nothing either way.
         self.set_reads_per_shot(reads_per_shot)
         self.config_all(qd.soc, load_envelopes=True, reset=True, load_mem=True)
         qd.soc.start_src("internal")
         self.get_data_shape(reads_per_shot)
         self.config_bufs(qd.soc, enable_avg=True, enable_buf=False)
+        qd.soc.reload_mem()
 
         # One start for the whole run. Everything after this is just draining.
         qd.soc.start_readout(total_reps, counter_addr=self.counter_addr,
@@ -519,6 +682,13 @@ class MultipointLockinODMR(NVAveragerProgram):
         freqs = np.asarray(self.cfg.multipoint_freqs_mhz, dtype=float)
         collected = 0
         idle_since = _perf_counter()
+
+        # QC, read back through `stream_qc` after the run. The point of streaming
+        # is that the rep axis is exact; these counters are what prove it on the
+        # data rather than assuming it.
+        self._stream_qc = {"packets": 0, "packet_sizes": [], "short_reads": 0,
+                           "expected_reps": int(total_reps), "collected": 0,
+                           "wall_start": _perf_counter()}
 
         while collected < total_reps:
             packets = obtain(qd.soc.poll_data())
@@ -537,7 +707,19 @@ class MultipointLockinODMR(NVAveragerProgram):
                 # acc_buf[0] is (n_reps * reads_per_shot, 2); NV readouts are DC, so
                 # only the I column carries signal.
                 block = np.asarray(acc_buf[0], dtype=float)[:, 0]
+                if block.size != n_reps * reads_per_shot:
+                    # A packet whose payload does not match its own rep count means
+                    # the reshape below would silently misalign every subsequent
+                    # sample, mixing the two parked frequencies together. Refuse
+                    # rather than emit scrambled data.
+                    self._stream_qc["short_reads"] += 1
+                    raise RuntimeError(
+                        f"stream() packet claims {n_reps} reps x {reads_per_shot} reads "
+                        f"= {n_reps * reads_per_shot} values but carries {block.size}. "
+                        f"Refusing to reshape; the parked frequencies would be mixed.")
                 block = block.reshape(n_reps, reads_per_shot) / scale
+                self._stream_qc["packets"] += 1
+                self._stream_qc["packet_sizes"].append(int(n_reps))
 
                 if per_freq == 1:
                     signal, reference = block, None
@@ -553,11 +735,38 @@ class MultipointLockinODMR(NVAveragerProgram):
                 out.signal = self._fold_slots(signal)
                 out.reference = self._fold_slots(reference)
                 collected += int(n_reps)
+                self._stream_qc["collected"] = collected
 
                 if progress:
                     print(f"  stream: +{n_reps} reps ({collected}/{total_reps}, "
                           f"t = {out.t_offset_s:.3f} s)")
                 yield out
+
+    _stream_qc = None
+
+    def stream_qc(self):
+        """Quality report for the last `stream()` run.
+
+        `duty_cycle` is the fraction of wall-clock time the FPGA actually spent
+        integrating. Streaming should sit very close to 1.0 -- that is the whole
+        point of it, and a low value means the host could not drain the queue.
+        """
+        if not self._stream_qc:
+            return {}
+        qc = dict(self._stream_qc)
+        sizes = np.asarray(qc.pop("packet_sizes"), dtype=float)
+        wall = _perf_counter() - qc.pop("wall_start")
+        fpga = qc["collected"] * self.time_per_rep()
+        qc.update({
+            "reps_missing": int(qc["expected_reps"] - qc["collected"]),
+            "packet_reps_median": float(np.median(sizes)) if sizes.size else float("nan"),
+            "packet_reps_min": float(sizes.min()) if sizes.size else float("nan"),
+            "packet_reps_max": float(sizes.max()) if sizes.size else float("nan"),
+            "wall_s": float(wall),
+            "fpga_s": float(fpga),
+            "duty_cycle": float(fpga / wall) if wall > 0 else float("nan"),
+        })
+        return qc
 
     def stream_headroom(self):
         """How much margin the streaming path has against buffer overflow.
@@ -582,16 +791,44 @@ class MultipointLockinODMR(NVAveragerProgram):
             "worker_stride_shots": max(1, int(0.1 * shots)),
         }
 
-    def describe_timing(self, reps=None):
-        """One-line human summary of the rate this configuration will deliver."""
+    def describe_timing(self, reps=None, host_call_s=None, host_floor_s=None):
+        """Human summary of the rate and the averaging headroom.
+
+        The second line is the one that matters in averaged mode: it says how
+        much of the per-call floor the FPGA work is actually using, and therefore
+        how much free averaging is being left on the table.
+        """
         reps = int(self.cfg.reps if reps is None else reps)
+        call = self.HOST_CALL_S if host_call_s is None else float(host_call_s)
+        floor = self.HOST_FLOOR_S if host_floor_s is None else float(host_floor_s)
         order = str(getattr(self.cfg, "multipoint_pair_order", "forward")).lower()
         n_slots = len(self.emission_order())
-        return (
+        fpga = reps * self.time_per_rep()
+        fits = self.reps_that_fit(floor)
+
+        lines = [
             f"{len(self.cfg.multipoint_freqs_mhz)} freqs, order={order} "
             f"({n_slots} slots/rep), tau={self.cfg.readout_integration_tus:.1f} us, "
             f"{reps} reps -> {self.time_per_rep() * 1e6:.0f} us/rep, "
-            f"{reps * self.time_per_rep() * 1e3:.2f} ms FPGA + "
-            f"{self.HOST_OVERHEAD_S * 1e3:.1f} ms host "
-            f"-> {self.predicted_rate_hz(reps):.1f} Hz"
-        )
+            f"{fpga * 1e3:.2f} ms FPGA work",
+        ]
+        if fpga < floor:
+            lines.append(
+                f"  averaged mode: {fpga * 1e3:.2f} ms of FPGA work hides under the "
+                f"{floor * 1e3:.1f} ms per-call floor ({100 * fpga / floor:.0f}% used) "
+                f"-> {self.predicted_rate_hz(reps, call):.1f} Hz")
+            if fits > reps:
+                lines.append(
+                    f"  FREE AVERAGING: {fits} reps also fit inside the floor. Raising "
+                    f"{reps} -> {fits} costs no rate and buys up to "
+                    f"{np.sqrt(fits / reps):.1f}x in sigma if the noise is white.")
+        else:
+            lines.append(
+                f"  averaged mode: FPGA work exceeds the {floor * 1e3:.1f} ms floor, so "
+                f"reps now trades against rate one for one "
+                f"-> {self.predicted_rate_hz(reps, call):.1f} Hz")
+        lines.append(
+            f"  burst/stream : {1 / self.time_per_rep():.0f} Hz per rep "
+            f"({self.time_per_rep() * 1e6:.0f} us cadence); the floor is paid once per "
+            f"burst instead of once per sample")
+        return "\n".join(lines)
