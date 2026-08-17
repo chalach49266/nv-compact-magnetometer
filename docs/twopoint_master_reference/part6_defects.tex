@@ -203,6 +203,114 @@ the ODMR calibration still being valid.
 \end{itemize}
 \end{openbox}
 
+\section{An interrupted cell wedges the board, and a kernel restart does not clear it}
+\label{sec:wedge}
+
+Found 2026-08-17, when Step~4C hung at its auto-zero \co{acquire()} and \co{Ctrl-C}
+produced a traceback ending in \co{sock.recv(size, socket.MSG\_WAITALL)}. Fixed the
+same day. It is recorded here because it silently contaminates data rather than
+only costing time, and because the recovery is not obvious.
+
+\subsection{The mechanism}
+
+\co{qick}'s \co{poll\_data()} takes a \co{timeout} argument that defaults to
+\co{None}, and its board-side body is
+
+\begin{center}
+\co{length, data = streamer.data\_queue.get(block=True, timeout=timeout)}
+\end{center}
+
+\noindent so with the default it blocks \emph{forever}. \co{qickdawg}'s drain loop
+called \co{qd.soc.poll\_data()} with no arguments, so every acquire inherited that
+default. The queue is fed by the board's readout worker, which only transfers once
+the tProc shot counter advances past a stride. If the counter never advances --- a
+program that did not start, a tProc left running by an earlier cell, an abandoned
+\co{stream()} generator --- nothing is ever queued and the RPC never replies.
+
+The client then sits in \co{sock.recv(..., MSG\_WAITALL)} waiting for a reply that
+is not coming. That is the traceback above, and the four consequences are:
+
+\begin{enumerate}
+  \item \textbf{The wait is unbounded.} No timeout, anywhere in the path.
+  \item \textbf{\co{Ctrl-C} only unblocks the client.} The board-side Pyro worker
+        thread stays blocked in \co{queue.get()} for the life of the daemon.
+  \item \textbf{That thread is still a consumer.} When the next run finally queues a
+        packet, the abandoned \co{get()} can take it instead of the live caller ---
+        so a subsequent run silently loses its first packet.
+  \item \textbf{Restarting the notebook kernel does not help}, because the wedged
+        thread is on the board, not in the client.
+\end{enumerate}
+
+\subsection{Reproduced offline}
+
+Against the real \co{qick.streamer.DataStreamer} driven by a fake board whose shot
+counter never advances (\file{scripts/} is not needed; the check is eight lines):
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+call & argument & result \\
+\midrule
+\co{poll\_data()} & \co{timeout=None} (the default) & never returned; killed at 3\,s \\
+\co{poll\_data(totaltime=0.1, timeout=1.0)} & finite & returned \co{[]} after 1.01\,s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{The fix}
+
+\begin{keybox}[title=\textbf{Three changes, all shipped}]
+\begin{enumerate}
+  \item \textbf{Every poll is bounded.} \co{NVAveragerProgram.\_drain\_readout()}
+        (extracted from \co{acquire()}, so it is now testable on its own) and
+        \co{stream()} both pass an explicit \co{timeout}. A stalled readout raises
+        \co{TimeoutError} naming the shot count instead of hanging. This is also
+        what makes \co{stream()}'s \co{poll\_timeout\_s} parameter work --- it was
+        unreachable before, since the call it guards never returned.
+  \item \textbf{Interrupts clean up.} The drain loop catches \co{BaseException}
+        (so, \co{Ctrl-C} too) and \co{stream()} has a \co{finally}, which for a
+        generator also runs on \co{GeneratorExit} --- the \co{break}, the interrupt,
+        and garbage collection of a partly-consumed stream. Both call
+        \co{\_abort\_readout()}: stop the tProc, then stop the readout.
+  \item \textbf{An explicit recovery.} \co{MultipointLockinODMR.recover()} stops the
+        tProc, stops the readout, and calls \co{DataStreamer.start\_worker()}, which
+        installs fresh queues and flags so anything blocked on the old queue is
+        orphaned against an object nothing will ever write to again.
+        \co{ensure\_idle()} is the one-RPC pre-flight now at the top of Steps 4A, 4B
+        and 4C; it escalates to \co{recover()} only when the board is actually dirty,
+        because a full recover per run leaks a board-side worker thread.
+\end{enumerate}
+\end{keybox}
+
+\begin{openbox}[title=\textbf{Still open: does this explain the burst replay?}]
+Consequence 3 above is a mechanism by which one run's packet is delivered to a
+\emph{different} run's consumer. That is the first concrete candidate for
+\S\ref{sec:replay} since \co{reset\_tproc=True} was eliminated, and it fits the
+alternating short/long signature: a call that receives a packet meant for the
+previous run returns early with stale contents.
+
+It is \textbf{not} established. The 2026-08-14 burst run was not obviously preceded
+by an interrupt, and a wedge should not recur once per two batches for 371 batches.
+Testable directly: run a burst with the fix in place and re-measure the stale
+fraction. If it drops from $\sim$50\% to zero, the two defects were one defect.
+\end{openbox}
+
+\section{Averaged and burst runs used to overwrite each other's filenames}
+\label{sec:namecollision}
+
+Step~4A and Step~4B both wrote \co{twopoint\_lockin\_live\_<stamp>.csv}. Nothing was
+lost --- the timestamps differ --- but an averaged run and a burst run were
+indistinguishable by name, which is why identifying which recorded file was which
+mode has repeatedly needed column inspection rather than a glance at the directory.
+
+Fixed 2026-08-17: Step~4A writes \co{twopoint\_lockin\_avg\_*}, Step~4B writes
+\co{twopoint\_lockin\_burst\_*}, Step~4C already wrote \co{twopoint\_lockin\_stream\_*}.
+\co{find\_live\_csvs()} in \file{analyze\_twopoint\_session.py} accepts all three
+prefixes so previously recorded sessions still load unchanged. Files already on disk
+keep their \co{\_live\_} names and are still found; only the mode has to be read from
+the columns, which \co{detect\_mode()} does anyway.
+
+
 \section{Post-processing: recovering runs already recorded}
 \label{sec:postproc}
 

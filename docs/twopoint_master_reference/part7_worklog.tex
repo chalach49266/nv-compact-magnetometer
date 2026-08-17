@@ -92,6 +92,73 @@ ABBA ordering & \Open & Implemented, never tested on hardware. \\
 \end{tabular}
 \end{center}
 
+\section{Round 3 --- 2026-08-17, the board wedge}
+
+Triggered by a live failure at the rig rather than by analysis: Step~4C hung at its
+auto-zero \co{acquire()}, and \co{Ctrl-C} would not release it. Diagnosed to
+\co{poll\_data()}'s \co{timeout=None} default and fixed the same day. Full account in
+\S\ref{sec:wedge}; the naming collision in \S\ref{sec:namecollision} was found while
+tracing which file each mode had written.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lp{10.4cm}@{}}
+\toprule
+\hd{Scope} & \hd{What it did} \\
+\midrule
+\co{fix(qickdawg):} &
+  \co{acquire()}'s drain loop extracted to \co{\_drain\_readout()} and bounded: an
+  explicit \co{poll\_data} timeout, a no-progress deadline that raises
+  \co{TimeoutError}, and a \co{BaseException} handler that stops the tProc and the
+  readout before re-raising. Adds \co{POLL\_TOTALTIME\_S}, \co{POLL\_TIMEOUT\_S},
+  \co{ACQUIRE\_IDLE\_S}, \co{\_acquire\_timeout\_s()} and \co{\_abort\_readout()}. \\[3pt]
+\co{fix(twopoint):} &
+  \co{stream()} passes the same explicit timeout --- which is what finally makes its
+  own \co{poll\_timeout\_s} reachable --- and wraps its loop in \co{try/finally}, so an
+  interrupted or abandoned generator leaves the board idle. Records
+  \co{stream\_qc()["aborted"]}. \\[3pt]
+\co{feat(twopoint):} &
+  \co{MultipointLockinODMR.recover()} and \co{ensure\_idle()}. The pre-flight is wired
+  into Steps 4A, 4B and 4C. \\[3pt]
+\co{fix(notebook):} &
+  Step~4A writes \co{twopoint\_lockin\_avg\_*} and Step~4B \co{twopoint\_lockin\_burst\_*}
+  instead of both writing \co{\_live\_}; \co{find\_live\_csvs()} accepts all three
+  prefixes. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Verified offline}
+
+No board was available, so all three paths were exercised against fakes built from
+the real \co{qick} sources:
+
+\begin{center}
+\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{2.4cm}
+                  >{\raggedright\arraybackslash}p{6.4cm}
+                  >{\raggedright\arraybackslash}p{4.6cm}@{}}
+\toprule
+\hd{Check} & \hd{What it drives} & \hd{Result} \\
+\midrule
+Root cause & real \co{DataStreamer}, counter frozen;
+  \co{poll\_data()} vs \co{poll\_data(timeout=1.0)} &
+  hangs vs returns in 1.01\,s \\[3pt]
+Healthy drain & \co{\_drain\_readout()} from the edited file, 50 shots in
+  10-shot packets & 50/50, buffer bit-exact \\[3pt]
+Stalled tProc & same, board returns nothing &
+  \co{TimeoutError} at the budget, board cleaned \\[3pt]
+Interrupt & \co{KeyboardInterrupt} mid-drain &
+  re-raised, board cleaned \\[3pt]
+Stream abort & real \co{stream()} source, consumer breaks after 10 reps &
+  \co{finally} ran, \co{aborted=True} \\[3pt]
+Stream completion & same, run to 20/20 reps &
+  cleaned, \co{aborted=False} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
 \section{The notebook layout}
 \label{sec:notebook}
 
@@ -224,6 +291,13 @@ rig machine. Each has a pass criterion.
 \hd{\#} & \hd{Check} & \hd{Command} & \hd{Pass criterion} \\
 \midrule
 \endhead
+S0 & \textbf{Does the wedge fix close the burst replay?} Now the cheapest
+  decisive test, because \S\ref{sec:wedge} gives \S\ref{sec:replay} its first
+  mechanism since \co{reset_tproc} was eliminated. \emph{Do this first.}
+  $\sim$1\,min. &
+  Run Step~4B for 30\,s and read \co{BURST_STALE_FRACTION}. &
+  \textbf{0\%} $\Rightarrow$ the replay was the wedge and both defects close.
+  Still $\sim$\textbf{50\%} $\Rightarrow$ they are independent; S1 next. \\[3pt]
 S1 & \textbf{Burst vs stream, interleaved.} Decides whether the $\sim$6$\times$
   streaming excess is the read path or the room. \emph{Do this first.} $\sim$1\,min. &
   \co{profile_twopoint_acquire.py --compare-read-paths --tau 120 --reps 500} &

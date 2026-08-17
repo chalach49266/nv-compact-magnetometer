@@ -53,7 +53,12 @@ def find_live_csvs(session: Path, stamp_prefix: str) -> list[Path]:
     The session folder also carries copies of earlier days' runs; those are not
     part of this session's timing story, so they are filtered out by timestamp.
     """
-    hits = sorted(session.rglob(f"twopoint_lockin_live_{stamp_prefix}*.csv"))
+    # Three prefixes because Step 4A and Step 4B both used to write
+    # `twopoint_lockin_live_*`, which made an averaged run and a burst run
+    # indistinguishable by name. New runs write `_avg_` and `_burst_`; `_live_`
+    # is kept so every already-recorded session still loads.
+    hits = sorted(q for prefix in ("live", "avg", "burst")
+                  for q in session.rglob(f"twopoint_lockin_{prefix}_{stamp_prefix}*.csv"))
     return [p for p in hits if not p.name.endswith(("_summary.csv",
                                                     "_peakshift_calibration.csv",
                                                     "_spectrum.csv"))]
@@ -670,7 +675,8 @@ def qc_find_burst_paths(session: Path) -> list[Path]:
     Ordering by batch count lets the caller take the most legible example.
     """
     scored = []
-    for path in sorted(session.rglob("twopoint_lockin_live_*.csv")):
+    for path in sorted(q for prefix in ("live", "avg", "burst")
+                       for q in session.rglob(f"twopoint_lockin_{prefix}_*.csv")):
         if path.name.endswith(("_summary.csv", "_peakshift_calibration.csv", "_spectrum.csv")):
             continue
         try:

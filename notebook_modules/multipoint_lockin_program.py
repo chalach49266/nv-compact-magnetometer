@@ -48,7 +48,7 @@ whose timing conclusion this one corrects.
 from __future__ import annotations
 
 import hashlib
-from time import perf_counter as _perf_counter
+from time import perf_counter as _perf_counter, sleep as _sleep
 
 import numpy as np
 from itemattribute import ItemAttribute
@@ -690,57 +690,79 @@ class MultipointLockinODMR(NVAveragerProgram):
                            "expected_reps": int(total_reps), "collected": 0,
                            "wall_start": _perf_counter()}
 
-        while collected < total_reps:
-            packets = obtain(qd.soc.poll_data())
-            if not packets:
-                if _perf_counter() - idle_since > poll_timeout_s:
-                    raise RuntimeError(
-                        f"stream() received no data for {poll_timeout_s:.0f} s after "
-                        f"{collected}/{total_reps} reps. The tProc may have stopped early."
-                    )
-                continue
-            idle_since = _perf_counter()
-
-            for n_reps, (acc_buf, _stats) in packets:
-                if n_reps <= 0 or acc_buf is None:
+        try:
+            while collected < total_reps:
+                # An explicit `timeout` is what makes `poll_timeout_s` below mean
+                # anything. qick's poll_data() defaults to timeout=None, which becomes
+                # data_queue.get(block=True, timeout=None) on the board: if the tProc
+                # counter stops advancing, that RPC never returns, and the idle check
+                # under it is unreachable. Worse, Ctrl-C then unblocks only the client
+                # -- the board-side Pyro thread stays blocked on the queue forever and
+                # steals the first packet of whatever runs next, which survives a
+                # kernel restart. See recover().
+                packets = obtain(qd.soc.poll_data(
+                    totaltime=self.POLL_TOTALTIME_S, timeout=self.POLL_TIMEOUT_S))
+                if not packets:
+                    if _perf_counter() - idle_since > poll_timeout_s:
+                        raise RuntimeError(
+                            f"stream() received no data for {poll_timeout_s:.0f} s after "
+                            f"{collected}/{total_reps} reps. The tProc may have stopped early."
+                        )
                     continue
-                # acc_buf[0] is (n_reps * reads_per_shot, 2); NV readouts are DC, so
-                # only the I column carries signal.
-                block = np.asarray(acc_buf[0], dtype=float)[:, 0]
-                if block.size != n_reps * reads_per_shot:
-                    # A packet whose payload does not match its own rep count means
-                    # the reshape below would silently misalign every subsequent
-                    # sample, mixing the two parked frequencies together. Refuse
-                    # rather than emit scrambled data.
-                    self._stream_qc["short_reads"] += 1
-                    raise RuntimeError(
-                        f"stream() packet claims {n_reps} reps x {reads_per_shot} reads "
-                        f"= {n_reps * reads_per_shot} values but carries {block.size}. "
-                        f"Refusing to reshape; the parked frequencies would be mixed.")
-                block = block.reshape(n_reps, reads_per_shot) / scale
-                self._stream_qc["packets"] += 1
-                self._stream_qc["packet_sizes"].append(int(n_reps))
+                idle_since = _perf_counter()
 
-                if per_freq == 1:
-                    signal, reference = block, None
-                else:
-                    signal, reference = block[:, 0::2], block[:, 1::2]
+                for n_reps, (acc_buf, _stats) in packets:
+                    if n_reps <= 0 or acc_buf is None:
+                        continue
+                    # acc_buf[0] is (n_reps * reads_per_shot, 2); NV readouts are DC, so
+                    # only the I column carries signal.
+                    block = np.asarray(acc_buf[0], dtype=float)[:, 0]
+                    if block.size != n_reps * reads_per_shot:
+                        # A packet whose payload does not match its own rep count means
+                        # the reshape below would silently misalign every subsequent
+                        # sample, mixing the two parked frequencies together. Refuse
+                        # rather than emit scrambled data.
+                        self._stream_qc["short_reads"] += 1
+                        raise RuntimeError(
+                            f"stream() packet claims {n_reps} reps x {reads_per_shot} reads "
+                            f"= {n_reps * reads_per_shot} values but carries {block.size}. "
+                            f"Refusing to reshape; the parked frequencies would be mixed.")
+                    block = block.reshape(n_reps, reads_per_shot) / scale
+                    self._stream_qc["packets"] += 1
+                    self._stream_qc["packet_sizes"].append(int(n_reps))
 
-                out = ItemAttribute()
-                out.per_rep = True
-                out.first_rep = collected
-                out.n_reps = int(n_reps)
-                out.t_offset_s = collected * cadence
-                out.frequencies_mhz = freqs
-                out.signal = self._fold_slots(signal)
-                out.reference = self._fold_slots(reference)
-                collected += int(n_reps)
-                self._stream_qc["collected"] = collected
+                    if per_freq == 1:
+                        signal, reference = block, None
+                    else:
+                        signal, reference = block[:, 0::2], block[:, 1::2]
 
-                if progress:
-                    print(f"  stream: +{n_reps} reps ({collected}/{total_reps}, "
-                          f"t = {out.t_offset_s:.3f} s)")
-                yield out
+                    out = ItemAttribute()
+                    out.per_rep = True
+                    out.first_rep = collected
+                    out.n_reps = int(n_reps)
+                    out.t_offset_s = collected * cadence
+                    out.frequencies_mhz = freqs
+                    out.signal = self._fold_slots(signal)
+                    out.reference = self._fold_slots(reference)
+                    collected += int(n_reps)
+                    self._stream_qc["collected"] = collected
+
+                    if progress:
+                        print(f"  stream: +{n_reps} reps ({collected}/{total_reps}, "
+                              f"t = {out.t_offset_s:.3f} s)")
+                    yield out
+        finally:
+            # This is a generator, so `finally` also runs on GeneratorExit -- the
+            # `break`, the Ctrl-C and the garbage collection of a partly-consumed
+            # stream. Without it, an interrupted run left the tProc looping and the
+            # board worker transferring into a queue nobody was draining, and the
+            # *next* acquire() inherited that: qick's start_readout() would find a
+            # readout still running, reset the tProc and flush the queue, and any
+            # packet still in flight from the abandoned run would land in the new
+            # one. Stopping here costs a few tens of milliseconds at the end of a
+            # normal run and removes a whole class of cross-run contamination.
+            self._abort_readout()
+            self._stream_qc["aborted"] = collected < total_reps
 
     _stream_qc = None
 
@@ -767,6 +789,100 @@ class MultipointLockinODMR(NVAveragerProgram):
             "duty_cycle": float(fpga / wall) if wall > 0 else float("nan"),
         })
         return qc
+
+    @staticmethod
+    def ensure_idle(verbose=True):
+        """Pre-flight for the top of an acquisition cell: is the board actually free?
+
+        Costs one RPC when the board is clean, which is why this is the thing to
+        call at the start of every run rather than `recover()`. A full recover()
+        per run would work but leaks a board-side worker thread each time.
+
+        Returns True if the board was already idle, False if it had to be
+        recovered. A False here means the *previous* cell did not finish cleanly,
+        so treat any data it wrote as suspect.
+        """
+        import qickdawg as qd
+
+        try:
+            running = bool(qd.soc.streamer.readout_running())
+        except Exception as exc:            # noqa: BLE001 - never block a run on the probe
+            if verbose:
+                print(f"  (could not probe the streamer: {exc}) -- continuing")
+            return True
+
+        if not running:
+            return True
+
+        if verbose:
+            print("Board still has a readout running from a previous cell -- recovering "
+                  "before starting, so this run does not inherit its data.")
+        MultipointLockinODMR.recover(verbose=verbose)
+        return False
+
+    @staticmethod
+    def recover(verbose=True):
+        """Unwedge the board after an interrupted or hung acquisition.
+
+        Run this whenever a cell had to be interrupted during `acquire()`,
+        `stream()` or a burst, or when a run that used to work starts hanging,
+        returning short, or producing data that looks like the previous run's.
+
+        **Restarting the notebook kernel does not do this.** The failure lives in
+        the board's Pyro daemon, not in the client:
+
+        `qick`'s `poll_data()` defaults to `timeout=None`, which becomes
+        `data_queue.get(block=True, timeout=None)` on the board. If the tProc shot
+        counter stops advancing -- a program that never started, a tProc left
+        running by a previous cell, an abandoned `stream()` generator -- that
+        `get` never returns, so the RPC never replies. Ctrl-C raises in the client
+        while it waits in `sock.recv(..., MSG_WAITALL)`, but the board-side thread
+        stays blocked on that queue for the lifetime of the daemon. It is then a
+        second consumer on the streamer's data queue, and the next run's first
+        packet can go to it instead of to you.
+
+        `DataStreamer.start_worker()` is the fix: it builds fresh queues, flags and
+        a fresh worker thread, so anything blocked on the old queue is orphaned
+        against an object nothing will ever write to again. That thread leaks --
+        Pyro's pool is ~40 threads, so a handful of incidents is harmless, but if
+        `recover()` stops helping, restart the board's Pyro server.
+
+        Returns a dict describing what was found and done.
+        """
+        import qickdawg as qd
+
+        report = {"readout_was_running": None, "steps": [], "errors": []}
+
+        def _step(name, fn):
+            try:
+                result = fn()
+                report["steps"].append(name)
+                return result
+            except Exception as exc:            # noqa: BLE001 - best effort by design
+                report["errors"].append(f"{name}: {exc}")
+                return None
+
+        report["readout_was_running"] = _step(
+            "query streamer", lambda: bool(qd.soc.streamer.readout_running()))
+
+        # Order matters. Stop the tProc first so the shot counter stops moving,
+        # then break the worker out of its transfer loop, then replace the queues.
+        _step("stop tProc", qd.soc.stop_tproc)
+        _step("stop readout", qd.soc.streamer.stop_readout)
+        _step("settle", lambda: _sleep(0.2))
+        _step("restart streamer worker", qd.soc.streamer.start_worker)
+        _step("reset generators", qd.soc.reset_gens)
+
+        if verbose:
+            print("Board recovery:")
+            print(f"  readout was running : {report['readout_was_running']}")
+            print(f"  completed           : {', '.join(report['steps'])}")
+            if report["errors"]:
+                print("  FAILED              : " + "; ".join(report["errors"]))
+                print("  If these persist, restart the Pyro server on the board.")
+            else:
+                print("  board is idle with a fresh streamer; re-run your acquisition cell.")
+        return report
 
     def stream_headroom(self):
         """How much margin the streaming path has against buffer overflow.

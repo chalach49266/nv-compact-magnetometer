@@ -21,6 +21,7 @@ except ModuleNotFoundError:
 import operator
 import functools
 import inspect
+from time import perf_counter as _perf_counter
 import numpy as np
 from typing import List, Optional
 from collections import defaultdict
@@ -160,6 +161,118 @@ class NVAveragerProgram(QickRegisterManagerMixin, AcquireProgram):
             sweep_pts.append(swp.get_sweep_pts())
         return sweep_pts
 
+    # --- Drain-loop bounds. -------------------------------------------------
+    #
+    # POLL_TOTALTIME_S  how long the board keeps gathering within one poll_data
+    #                   RPC once data starts arriving. qick's own default.
+    # POLL_TIMEOUT_S    how long the board waits for the *next* packet before
+    #                   giving up and returning what it has. qick defaults this
+    #                   to None, which means "block forever"; that is the wedge.
+    #                   It has to be comfortably longer than the board worker's
+    #                   transfer period (a stride is ~10% of the accumulated
+    #                   buffer) or a healthy run would time out early.
+    # ACQUIRE_IDLE_S    how long the client tolerates *zero* progress before
+    #                   declaring the tProc dead. Scaled by the expected run
+    #                   length so long bursts and streams are not cut short.
+    POLL_TOTALTIME_S = 0.1
+    POLL_TIMEOUT_S = 1.0
+    ACQUIRE_IDLE_S = 10.0
+
+    def _acquire_timeout_s(self, total_count):
+        """Seconds of no-progress to tolerate before giving up on a readout."""
+        expected = 0.0
+        try:
+            # Rough FPGA run length, when the subclass can estimate it.
+            expected = float(total_count) * float(self.time_per_rep())
+        except Exception:
+            pass
+        return max(self.ACQUIRE_IDLE_S, 2.0 * expected)
+
+    def _drain_readout(self, total_count, pbar):
+        """Read `total_count` shots out of the accumulated buffer into `self.d_buf`.
+
+        Assumes `start_readout` has already been issued. Returns the shot count,
+        which equals `total_count` on success.
+
+        Every wait here is bounded, which is the whole point of the method.
+        `poll_data()`'s own default is `timeout=None`, and its board-side body is
+        then `data_queue.get(block=True, timeout=None)`: if the tProc shot counter
+        never advances -- a program that did not start, a tProc left running by an
+        earlier cell, an abandoned `stream()` -- that `get` never returns, so the
+        RPC never replies and the client sits in `sock.recv(..., MSG_WAITALL)`.
+
+        Ctrl-C at that point unblocks only the client. The board-side Pyro thread
+        stays blocked on the queue for the life of the daemon, and it is still a
+        consumer, so the next run's first packet can be delivered to it instead of
+        to you. That state survives a notebook kernel restart, because it lives on
+        the board. `MultipointLockinODMR.recover()` is the way out.
+
+        Passing a finite timeout turns the block into a `queue.Empty` and a prompt
+        return, so a stalled readout raises `TimeoutError` here instead of hanging,
+        and an interrupt lands somewhere the `except` below can clean up after it.
+        """
+        count = 0
+        idle_budget = self._acquire_timeout_s(total_count)
+        deadline = _perf_counter() + idle_budget
+        try:
+            while count < total_count:
+                new_data = obtain(qd.soc.poll_data(
+                    totaltime=self.POLL_TOTALTIME_S,
+                    timeout=self.POLL_TIMEOUT_S))
+                if not new_data:
+                    if _perf_counter() > deadline:
+                        raise TimeoutError(
+                            "acquire() read %d of %d shots and then saw nothing for "
+                            "%.1f s. The tProc shot counter is not advancing: the "
+                            "program may not be running, or an earlier interrupted "
+                            "cell left the board wedged. Run "
+                            "MultipointLockinODMR.recover() and try again."
+                            % (count, total_count, idle_budget))
+                    continue
+                for new_points, (d, s) in new_data:
+                    # print(new_points, (d, s))
+                    for ii, nreads in enumerate(self.reads_per_shot):
+                        # print(count, new_points, nreads, d[ii].shape, total_count)
+                        if new_points * nreads != d[ii].shape[0]:
+                            logger.error(
+                                "data size mismatch: new_points=%d, nreads=%d, data shape %s" %
+                                (new_points, nreads, d[ii].shape))
+                        if count + new_points > total_count:
+                            logger.error(
+                                "got too much data: count=%d, new_points=%d, total_count=%d" %
+                                (count, new_points, total_count))
+                        # use reshape to view the d_buf array in a shape that matches the raw data
+                        self.d_buf[ii].reshape((-1, 2))[count * nreads:(count + new_points) * nreads] = d[ii]
+                    count += new_points
+                    self.stats.append(s)
+                    pbar.update(new_points)
+                # Progress was made, so restart the idle clock.
+                deadline = _perf_counter() + idle_budget
+        except BaseException:
+            # BaseException so this also covers KeyboardInterrupt. Leave the board
+            # idle rather than mid-readout, so the next call starts from a known
+            # state instead of inheriting a running tProc and an undrained queue.
+            self._abort_readout()
+            raise
+        return count
+
+    def _abort_readout(self):
+        """Leave the board idle after a failed or interrupted readout.
+
+        Best-effort and never raises: it runs from an exception handler, where a
+        second exception would mask the first. Stopping the tProc keeps the shot
+        counter from advancing under a streamer that is no longer being drained;
+        stop_readout() breaks the board-side worker out of its transfer loop.
+        """
+        try:
+            qd.soc.stop_tproc()
+        except Exception as exc:
+            logger.warning("could not stop the tProc while aborting readout: %s", exc)
+        try:
+            qd.soc.streamer.stop_readout()
+        except Exception as exc:
+            logger.warning("could not stop the streamer while aborting readout: %s", exc)
+
     def acquire(self, load_pulses=True, readouts_per_experiment: Optional[int] = None,
                 save_experiments: List = None, start_src: str = "internal",
                 progress=False, remove_offset=True, reset_tproc: bool = False):
@@ -277,29 +390,10 @@ class NVAveragerProgram(QickRegisterManagerMixin, AcquireProgram):
             # Reload data memory.
             qd.soc.reload_mem()
 
-            count = 0
             with tqdm(total=total_count, disable=hidereps) as pbar:
                 qd.soc.start_readout(total_count, counter_addr=self.counter_addr,
                                      ch_list=list(self.ro_chs), reads_per_shot=self.reads_per_shot)
-                while count < total_count:
-                    new_data = obtain(qd.soc.poll_data())
-                    for new_points, (d, s) in new_data:
-                        # print(new_points, (d, s))
-                        for ii, nreads in enumerate(self.reads_per_shot):
-                            # print(count, new_points, nreads, d[ii].shape, total_count)
-                            if new_points * nreads != d[ii].shape[0]:
-                                logger.error(
-                                    "data size mismatch: new_points=%d, nreads=%d, data shape %s" %
-                                    (new_points, nreads, d[ii].shape))
-                            if count + new_points > total_count:
-                                logger.error(
-                                    "got too much data: count=%d, new_points=%d, total_count=%d" %
-                                    (count, new_points, total_count))
-                            # use reshape to view the d_buf array in a shape that matches the raw data
-                            self.d_buf[ii].reshape((-1, 2))[count * nreads:(count + new_points) * nreads] = d[ii]
-                        count += new_points
-                        self.stats.append(s)
-                        pbar.update(new_points)
+                self._drain_readout(total_count, pbar)
 
         return self.d_buf[0][..., 0]
         # return self.d_buf
