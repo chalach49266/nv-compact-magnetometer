@@ -355,20 +355,39 @@ def _fit_max_slope(freq, y, window, step, max_lines=6):
 
 def _noise_estimates(freq, y, init_mask, k=4.0, n_iter=6):
     """White (successive-difference) noise + sigma-clipped detrended baseline."""
-    if init_mask.sum() > 3:
-        sdiff = float(np.std(np.diff(y[init_mask]), ddof=1) / np.sqrt(2))
+    valid = np.isfinite(freq) & np.isfinite(y)
+    base_mask = np.asarray(init_mask, dtype=bool) & valid
+    if base_mask.sum() < 2:
+        base_mask = valid
+    if base_mask.sum() < 2:
+        return {"sdiff": np.nan, "baseline": np.nan, "n_clean": int(base_mask.sum())}
+
+    if base_mask.sum() > 3:
+        sdiff = float(np.std(np.diff(y[base_mask]), ddof=1) / np.sqrt(2))
     else:
-        sdiff = float(np.std(y[init_mask], ddof=1)) if init_mask.sum() > 1 else np.nan
-    m = init_mask.copy()
-    deg = 3 if init_mask.sum() > 8 else 1
+        sdiff = float(np.std(y[base_mask], ddof=1))
+    if not np.isfinite(sdiff) or sdiff <= 0:
+        sdiff = float(np.std(y[base_mask], ddof=1))
+
+    m = base_mask.copy()
+    deg = min(3 if base_mask.sum() > 8 else 1, int(base_mask.sum()) - 1)
     for _ in range(n_iter):
+        if m.sum() <= deg:
+            break
         coef = np.polyfit(freq[m], y[m], deg)
         resid = y - np.polyval(coef, freq)
-        m_new = init_mask & (np.abs(resid) < k * max(sdiff, 1e-9))
+        threshold = k * max(sdiff if np.isfinite(sdiff) else 0.0, 1e-9)
+        m_new = base_mask & (np.abs(resid) < threshold)
         if m_new.sum() < 15 or np.array_equal(m_new, m):
             m = m_new if m_new.sum() >= 15 else m
             break
         m = m_new
+
+    deg = min(deg, int(m.sum()) - 1)
+    if m.sum() <= deg:
+        baseline = float(np.std(y[base_mask], ddof=1))
+        return {"sdiff": sdiff, "baseline": baseline, "n_clean": int(base_mask.sum())}
+
     coef = np.polyfit(freq[m], y[m], deg)
     baseline = float(np.std((y - np.polyval(coef, freq))[m], ddof=1))
     return {"sdiff": sdiff, "baseline": baseline, "n_clean": int(m.sum())}
@@ -430,6 +449,13 @@ def estimate_sensitivity(
     init_mask = np.ones_like(x, bool)
     for c in features:
         init_mask &= np.abs(x - c) > noise_guard_mhz
+    min_noise_points = min(15, max(5, len(x) // 5))
+    if init_mask.sum() < min_noise_points:
+        outside_window = (x < window[0]) | (x > window[1])
+        if outside_window.sum() >= min_noise_points:
+            init_mask = outside_window
+        else:
+            init_mask = np.ones_like(x, bool)
 
     results = {}
     for name, y in available.items():

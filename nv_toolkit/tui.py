@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import curses
 import json
 import math
 import os
@@ -10,7 +9,17 @@ import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
+
+try:
+    import curses
+except ModuleNotFoundError as exc:
+    if exc.name not in {"curses", "_curses"}:
+        raise
+    curses = None  # type: ignore[assignment]
+    _CURSES_IMPORT_ERROR = exc
+else:
+    _CURSES_IMPORT_ERROR = None
 
 import numpy as np
 
@@ -31,6 +40,15 @@ INTENSITY_COLUMN_CANDIDATES = ("normalized_intensity", "intensity", "signal", "n
 SAVE_ID_COLUMN_CANDIDATES = ("save_id", "scan_id", "run_id", "sample_id")
 RAW_FREQUENCY_COLUMN = "frequency_MHz"
 RAW_MW_ON_COLUMN = "photoluminescence_mw_on_ADC"
+
+
+def _require_curses() -> Any:
+    if curses is None:
+        raise RuntimeError(
+            "Interactive curses UI is not available in this Python environment. "
+            "On Windows, install the 'windows-curses' package or run operator mode with --popup."
+        ) from _CURSES_IMPORT_ERROR
+    return curses
 
 
 @dataclass(frozen=True)
@@ -1755,10 +1773,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.popup:
             _run_popup_operator(config)
         else:
-            curses.wrapper(_run_live_operator, config)
+            _require_curses().wrapper(_run_live_operator, config)
         return 0
 
-    curses.wrapper(_run_demo_tui, demos, args.demo)
+    _require_curses().wrapper(_run_demo_tui, demos, args.demo)
     return 0
 
 

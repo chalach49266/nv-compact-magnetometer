@@ -505,6 +505,7 @@ class MultipointLockinODMR(NVAveragerProgram):
             )
 
         self.set_reads_per_shot(reads_per_shot)
+        self.reads_per_shot = [int(ro["trigs"]) for ro in self.ro_chs.values()]
         self.config_all(qd.soc, load_envelopes=True, reset=True, load_mem=True)
         qd.soc.start_src("internal")
         self.get_data_shape(reads_per_shot)

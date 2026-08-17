@@ -1,2 +1,2 @@
-save_id,timestamp_epoch_s,n_channels,rank,condition_number,residual_norm_uT,delta_Bx_uT,delta_By_uT,delta_Bz_uT,status
-000000,0.11278162430971861,8,3,1.4603034400346002,35.51194589130787,2.394764856451015,1.3861888465280785,11.254921076156256,ok
+save_id,timestamp_epoch_s,n_channels,n_solve_channels,selected_blocks,solver,rank,condition_number,residual_norm_uT,solve_residual_norm_uT,delta_Bx_uT,delta_By_uT,delta_Bz_uT,status
+000000,0.11423559999093413,8,8,all,weighted_lstsq,3,7.4980649268084605,11.839496394347622,11.839496394347622,-5.010847403672794,11.209501820708567,-7.430579281843735,ok
