@@ -12,17 +12,51 @@ invalidating it.
 
 ---
 
+> ## ⚠ Correction — 2026-08-16
+>
+> **Claim 1 below is wrong and is retracted.** The rate is **host-bound**, not FPGA-bound.
+> The original comment in Step 4 of the notebook — the one this document "corrected" — was
+> closer to the truth than the correction was.
+>
+> The error was methodological: the 2026-08-06 session ran at a **single operating point**
+> (τ = 213 µs, 23 reps), where the FPGA work (9.80 ms) happens to be almost exactly the
+> batch period (11.38 ms). Attributing the difference to host overhead assumed a serial
+> `period = host + FPGA` model that one point cannot test.
+>
+> The 2026-08-14 session tests it. τ was correctly reduced to 120 µs, FPGA work per batch
+> fell from 9.80 ms to **2.40 ms**, and the batch period **did not move** (11.34 ms). Worse
+> for the serial model: the *fastest* batch in those runs is 10.14 ms, above the supposed
+> host term. Across 08-04/06/14, FPGA work spans **2.40 → 9.80 ms while the period stays
+> 10.2 → 11.4 ms**.
+>
+> There is a **~10 ms floor per `acquire()` call** that is independent of the readout
+> window. FPGA work is effectively free underneath it. Consequences that reverse what §2
+> and §2.6 say:
+>
+> - Shortening τ cannot raise the averaged-mode rate. It never could.
+> - **Averaging is free up to the floor**: at τ = 120 µs, `reps` can rise to ~40 at no cost
+>   in rate.
+> - Beating ~90 Hz requires amortising the floor across many samples — burst or stream.
+>
+> §3 (the readout-window optimum) and §4 (the burst-mode replay) are unaffected: neither
+> depends on the timing model. But note that §4.3's root cause is **disproved** — see the
+> second correction at §4.3.
+>
+> Full evidence and the corrected model:
+> [`../2026-08-14_twopoint_methods/TWOPOINT_METHODS_AND_TIMING.md`](../2026-08-14_twopoint_methods/TWOPOINT_METHODS_AND_TIMING.md) §3.3.
+
+---
+
 ## 1. Executive summary
 
 Three separate problems, one of which had been mis-diagnosed in the notebook itself.
 
-**1. The rate is FPGA-bound, not host-bound.** At 23 reps a batch takes 11.37 ms, of which
-**9.77 ms (86%) is the two ADC integration windows** and only ~1.6 ms is host round-trip.
-The Python loop outside `acquire()` costs 0.047 ms — 0.4% of the period. The comment block
-in Step 4 of `Modules/Twopoint_Lockin_module.ipynb` asserts the opposite ("~10 ms of fixed
-host overhead… any pulse work that fits inside that ~10 ms window is FREE"), and that wrong
-model is why raising `LIVE_REPS_PER_BATCH` to 23 did not come for free and why the rate has
-not moved. **The readout window is the rate.** See §2.
+**1. ~~The rate is FPGA-bound, not host-bound.~~ RETRACTED — see the correction above.** At
+23 reps a batch takes 11.37 ms, of which 9.77 ms is the two ADC integration windows and
+~1.6 ms was attributed to host round-trip. The 2026-08-14 data shows that attribution is
+wrong: the two terms run concurrently, and there is a ~10 ms per-call floor that sets the
+rate at any readout window. The Python loop outside `acquire()` costing 0.047 ms (0.4% of
+the period) still stands. See §2, read with the correction above.
 
 **2. 213 µs is past the sensitivity optimum.** Across a 17-point integration-time sweep,
 dip contrast is flat (0.49–0.54) and `σ_z·√τ` is constant below ~140 µs but rises above it —
@@ -143,6 +177,12 @@ At τ = 213 µs, 23 reps, two frequencies, no reference readout:
 
 (The three medians are computed independently over all batches, so they do not sum exactly.)
 
+> **Correction 2026-08-16.** The "host round-trip = 1.60 ms" row is a *residual*, not a
+> measurement: it is `period − FPGA` under an assumed serial model. The 2026-08-14 data
+> (FPGA 2.40 ms, period 11.34 ms, fastest batch 10.14 ms) shows the two terms overlap and
+> that the host chain is really **~10 ms**. Read this table as "9.77 ms of FPGA work fits
+> inside a ~10 ms host call", not as a serial sum.
+
 ### 2.5 Why the rate wobbles 82–98 Hz
 
 Across 12 averaged runs, the instantaneous rate spans **81.4 → 100.1 Hz** with a median of
@@ -164,22 +204,31 @@ Across 12 averaged runs, the instantaneous rate spans **81.4 → 100.1 Hz** with
 
 ### 2.6 What each knob actually buys
 
-Using the corrected model `period ≈ reps × n_freqs × τ + 1.6 ms`:
+> **Correction 2026-08-16.** The model in this section, `period ≈ reps × n_freqs × τ +
+> 1.6 ms`, is wrong. The correct one is
+> `period ≈ max(10 ms, reps × n_freqs × τ)`. The τ and reps rows below are therefore
+> **backwards**: neither is a rate lever until the FPGA work exceeds ~10 ms, and reps is a
+> *free sensitivity* lever below that. Corrected table:
+> [`../2026-08-14_twopoint_methods/TWOPOINT_METHODS_AND_TIMING.md`](../2026-08-14_twopoint_methods/TWOPOINT_METHODS_AND_TIMING.md) §3.5.
+> The `skip_reference`, `n_freqs`, `LIVE_SHOW_PLOT` and `SAVE_EVERY_SEC` rows still hold.
+
+Using the (superseded) model `period ≈ reps × n_freqs × τ + 1.6 ms`:
 
 | Knob | Effect on rate | Effect on sensitivity | Verdict |
 |---|---|---|---|
-| `readout_integration_tus` (τ) | **linear** — the dominant term | flat for τ ≤ 140 µs, worse above | **the main lever**; 213 → 120 µs is 1.75× |
-| `LIVE_REPS_PER_BATCH` | linear | √N only while noise is white; ×23 currently delivers ×2.9, not ×4.8 | modest; see §3.2 |
+| `readout_integration_tus` (τ) | ~~**linear** — the dominant term~~ **none below the floor** | flat for τ ≤ 140 µs, worse above | ~~the main lever~~ **not a rate lever** |
+| `LIVE_REPS_PER_BATCH` | ~~linear~~ **none below the floor** | √N only while noise is white; ×23 currently delivers ×2.9, not ×4.8 | **free averaging** up to the floor |
 | `multipoint_skip_reference` | 2× (already enabled) | removes a contaminated normaliser | keep on |
 | `n_freqs` | linear | two is the minimum for a two-point estimator | fixed at 2 |
-| host overhead | fixed ~1.6 ms per **call** | none | only avoidable by not calling per sample — §4.4 |
+| host overhead | ~~fixed ~1.6 ms~~ **~10 ms floor** per **call** | none | only avoidable by not calling per sample — §4.4 |
 | `LIVE_SHOW_PLOT` | 20–100 ms per redraw | none | keep `False`, already is |
 | `SAVE_EVERY_SEC` rewrite | 25–220 ms every 5 s | none | fix to append-only — §6 |
 
-**The 1 kHz question.** Host overhead is charged *per acquire call*, so a 1 ms period cannot
-absorb 1.6 ms at any rep count — 1 kHz is unreachable with the current one-call-per-sample
-architecture. It needs a single `start_readout` with continuous polling, which is the same
-change that removes the burst-mode race (§4.4).
+**The 1 kHz question.** The conclusion here survives the correction, and in fact gets
+stronger: the per-call cost is ~10 ms, not 1.6 ms, so a 1 ms period is unreachable by a wide
+margin with one call per sample. It needs a single `start_readout` with continuous polling
+(§4.4). That was built, and on 2026-08-14 it delivered **1041.7 Hz** as designed — though at
+a noise floor 4.2× worse than burst mode, which is a separate open defect.
 
 ---
 
@@ -394,6 +443,24 @@ are the *sole* cause of the stale reads is a strong hypothesis, not yet proven �
 the rig. The fixes in §6 are deliberately layered so the outcome does not depend on it:
 the correction is applied first, a freshness guard catches any residual duplicates
 regardless of mechanism, and the streaming mode avoids the race by construction.
+
+> ### ⚠ Correction 2026-08-16 — the hypothesis is disproved
+>
+> The rig ran the corrected code on 2026-08-14 (confirmed: τ = 120 µs took effect and the
+> new streaming cell produced output), with `reset_tproc=True` active in burst mode. The
+> replay is **unchanged**: `twopoint_lockin_live_20260814_150458.csv` has **185 of 371
+> batches ≥90% bit-identical to the batch before**, exactly 50.0%, with the same strictly
+> alternating 12 ms / 120 ms signature.
+>
+> So fixing the `config_all` keyword and forcing `reset=True` is **not** the cure. The
+> signature mismatch was a real bug and is still worth having fixed, but it was not the
+> mechanism. The layering described above is what saved this: the freshness guard detects
+> the replay regardless of cause, and streaming is unaffected (zero duplicate rows across
+> 31,250 samples).
+>
+> Current mitigation is to make the guard *act* rather than warn
+> (`multipoint_on_stale="drop"`), and to prefer streaming for sustained high rates.
+> See [`../2026-08-14_twopoint_methods/TWOPOINT_METHODS_AND_TIMING.md`](../2026-08-14_twopoint_methods/TWOPOINT_METHODS_AND_TIMING.md) §6.
 
 ### 4.4 Why streaming is the real answer
 
