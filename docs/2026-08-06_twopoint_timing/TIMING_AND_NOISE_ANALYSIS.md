@@ -12,6 +12,12 @@ invalidating it.
 
 ---
 
+> **Superseded 2026-08-17.** Merged into [`../twopoint_master_reference/TWOPOINT_MASTER_REFERENCE.pdf`](../twopoint_master_reference/TWOPOINT_MASTER_REFERENCE.pdf), whose Chapter 11 is a
+> register of every correction to this file. Kept as the record of what was believed
+> on 2026-08-12.
+
+---
+
 > ## ⚠ Correction — 2026-08-16
 >
 > **Claim 1 below is wrong and is retracted.** The rate is **host-bound**, not FPGA-bound.

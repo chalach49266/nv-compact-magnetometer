@@ -9,6 +9,12 @@ Tables live in [`tables/`](tables/), figures in [`figures/`](figures/). Nothing 
 typed by hand; re-running the analysis after a new session refreshes the document rather
 than invalidating it.
 
+> **Superseded 2026-08-17 by the master reference.** This document and the 2026-08-06
+> analysis are merged into [`../twopoint_master_reference/TWOPOINT_MASTER_REFERENCE.pdf`](../twopoint_master_reference/TWOPOINT_MASTER_REFERENCE.pdf) (44 pp.), which adds a per-method timing
+> breakdown with every component's contribution in milliseconds, a work log of what has
+> been changed and pushed, and a to-do list with pass criteria. This file is kept as the
+> record of what was believed on its date.
+
 This supersedes the timing conclusion of
 [`../2026-08-06_twopoint_timing/`](../2026-08-06_twopoint_timing/TIMING_AND_NOISE_ANALYSIS.md),
 which is annotated with the correction. Its readout-window analysis (§3 there) still stands.
