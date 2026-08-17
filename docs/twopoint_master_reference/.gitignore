@@ -1,0 +1,8 @@
+# latexmk / pdflatex build products. The PDF itself IS committed.
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.toc
+build.log

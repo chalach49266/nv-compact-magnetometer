@@ -1,0 +1,83 @@
+% ---------------------------------------------------------------------------
+% Shared preamble for the two-point lock-in master reference.
+% ---------------------------------------------------------------------------
+\documentclass[11pt,a4paper]{report}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[margin=2.4cm,top=2.6cm,bottom=2.6cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage[most]{tcolorbox}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{underscore}          % lets _ work in text mode; keeps identifiers readable
+\usepackage[hidelinks,bookmarksnumbered]{hyperref}
+
+\sisetup{detect-weight=true,detect-family=true}
+
+% --- colours -------------------------------------------------------------
+\definecolor{accent}{HTML}{1F4E79}
+\definecolor{good}{HTML}{1B7A3D}
+\definecolor{bad}{HTML}{A81E1E}
+\definecolor{warn}{HTML}{B36B00}
+\definecolor{rulegrey}{HTML}{888888}
+\definecolor{shade}{HTML}{F2F5F8}
+
+% --- headings ------------------------------------------------------------
+\titleformat{\chapter}[display]
+  {\normalfont\huge\bfseries\color{accent}}{\Large\chaptertitlename\ \thechapter}{8pt}{\Huge}
+\titlespacing*{\chapter}{0pt}{-18pt}{22pt}
+\titleformat{\section}{\normalfont\Large\bfseries\color{accent}}{\thesection}{0.7em}{}
+\titleformat{\subsection}{\normalfont\large\bfseries}{\thesubsection}{0.7em}{}
+\titleformat{\subsubsection}{\normalfont\normalsize\bfseries}{\thesubsubsection}{0.7em}{}
+
+\setcounter{tocdepth}{2}
+\setcounter{secnumdepth}{3}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{rulegrey}Two-point lock-in --- master reference}
+\fancyhead[R]{\small\color{rulegrey}\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\setlist{itemsep=2pt,topsep=4pt,parsep=0pt}
+
+% --- semantic macros -----------------------------------------------------
+\newcommand{\co}[1]{\texttt{\small #1}}
+\newcommand{\file}[1]{\texttt{\small #1}}
+\newcommand{\us}{\si{\micro\second}}
+\newcommand{\ms}{\si{\milli\second}}
+\newcommand{\nTrtHz}{\si{\nano\tesla\per\sqrt{\hertz}}}
+\newcommand{\etaunit}{nT/$\sqrt{\text{Hz}}$}
+\newcommand{\tauro}{$\tau$}
+
+\newcommand{\Done}{\textcolor{good}{\textbf{DONE}}}
+\newcommand{\Open}{\textcolor{bad}{\textbf{OPEN}}}
+\newcommand{\Partial}{\textcolor{warn}{\textbf{PARTIAL}}}
+
+% Callout boxes
+\newtcolorbox{keybox}[1][]{colback=shade,colframe=accent,coltitle=white,
+  fonttitle=\bfseries,title={#1},boxrule=0.9pt,arc=2pt,left=6pt,right=6pt,
+  top=5pt,bottom=5pt,breakable}
+\newtcolorbox{retractbox}[1][]{colback=bad!5,colframe=bad,coltitle=white,
+  fonttitle=\bfseries,title={#1},boxrule=0.9pt,arc=2pt,left=6pt,right=6pt,
+  top=5pt,bottom=5pt,breakable}
+\newtcolorbox{openbox}[1][]{colback=warn!6,colframe=warn,coltitle=white,
+  fonttitle=\bfseries,title={#1},boxrule=0.9pt,arc=2pt,left=6pt,right=6pt,
+  top=5pt,bottom=5pt,breakable}
+
+% Table helpers
+\newcommand{\hd}[1]{\textbf{#1}}
+\newcommand{\tstrut}{\rule{0pt}{2.5ex}}

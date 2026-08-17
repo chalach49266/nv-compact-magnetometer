@@ -1,0 +1,179 @@
+\chapter{Method C --- Streaming mode}
+\label{sec:stream}
+
+\begin{center}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+Notebook cell & Step 4C (analysis: Step 5C) \\
+Code path & \co{prog.stream(total_reps=N)} --- a generator \\
+One packet returns & 38--500 reps, continuously, as they arrive \\
+Measured rate & \textbf{1041.7\,Hz} (or 4167\,Hz with no host binning) \\
+Rate limited by & the FPGA cadence alone \\
+Duty cycle & \textbf{100.0\%} \\
+Measured floor & 240\,\etaunit \\
+Open defects & \Open{} \textbf{floor is $\sim$6$\times$ burst} (\S\ref{sec:streamnoise});
+              25\% PL droop (\S\ref{sec:droop}) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Mechanics}
+
+One \co{config_all}, one \co{start_readout(total_reps)}, then nothing but draining
+the streamer queue with \co{poll_data()} in a loop. The board-side worker thread
+transfers completed shots out of the accumulated buffer autonomously while the
+tProc keeps running.
+
+Because nothing is re-armed mid-run:
+
+\begin{itemize}
+  \item the replay race of Method B \textbf{cannot occur} --- there is no second
+        configuration to race against;
+  \item there is \textbf{no inter-burst gap} --- the FPGA never stops;
+  \item timestamps follow the FPGA cadence \textbf{exactly}, rather than being
+        reconstructed from host arrival times, which only record when the host
+        happened to drain the queue.
+\end{itemize}
+
+\paragraph{\co{cfg.reps} is the run length.} The tProc loops \co{reps} times and
+ends, so the rep count must be set before compilation and cannot change mid-run.
+\co{stream()} raises if \co{cfg.reps != total_reps} rather than silently
+truncating.
+
+\paragraph{Host-side binning.} \co{STREAM_TARGET_HZ} sets an integer number of
+reps to average on the host per output sample. Whole reps only, so the achieved
+rate is the cadence divided by an integer rather than exactly the target: at
+$\tau=\SI{120}{\micro\second}$, a 1000\,Hz target gives $\text{bin}=4$ and
+therefore 1041.7\,Hz. Leftover reps carry into the next packet, so no rep is
+dropped and no bin straddles a packet boundary.
+
+\section{Timing budget, component by component}
+\label{sec:streambudget}
+
+\subsection*{Operating point: $\tau=\SI{120}{\micro\second}$, bin = 4 (2026-08-14)}
+
+\begin{center}
+\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.3cm}rr>{\raggedright\arraybackslash}p{5.4cm}@{}}
+\toprule
+\hd{Component} & \hd{Per output sample} & \hd{Share} & \hd{How obtained} \\
+\midrule
+ADC integration ($4\times\SI{240}{\micro\second}$)
+  & \textbf{\SI{960.0}{\micro\second}} & \textbf{100.0\%} & exact, Eq.~\ref{eq:recover}, $D$=147456 \\
+Host RPC chain
+  & \SI{0}{\micro\second} & 0\% & \textbf{paid once for the whole run} \\
+Inter-packet gap
+  & \SI{0}{\micro\second} & 0\% & the FPGA does not stop between packets \\
+Timestamp jitter
+  & \SI{0.0}{\micro\second} & 0\% & cadence-derived; min = max = \SI{960.0}{\micro\second} \\
+\midrule
+\textbf{TOTAL per output sample} & \textbf{\SI{960.0}{\micro\second}} & 100\% & measured spacing \\
+Rate & \textbf{1041.67\,Hz} & & predicted 1041.67\,Hz --- \emph{exact} \\
+Duty cycle & \textbf{100.0\%} & & 125\,000 reps $\times$ \SI{240}{\micro\second} in \SI{29.999}{\second} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{keybox}[This is what a clean timing budget looks like]
+Every microsecond of the \SI{960}{\micro\second} sample period is ADC integration.
+The measured sample spacing has \textbf{min = max = \SI{960.0}{\micro\second}} ---
+zero jitter, because the timestamps come from the cadence rather than from arrival
+times. Predicted and measured rate agree to the digit.
+
+Compare Method A, where 79\% of the period is host overhead, and Method B, where
+26\% is overhead and waste.
+\end{keybox}
+
+\subsection{Rate against binning}
+
+\begin{center}
+\small
+\begin{tabular}{@{}rrrl@{}}
+\toprule
+\hd{\co{bin}} & \hd{Per output sample} & \hd{Rate} & \hd{Note} \\
+\midrule
+1 & \SI{240}{\micro\second} & \textbf{4166.7\,Hz} & \co{STREAM_TARGET_HZ = None}; every rep kept \\
+2 & \SI{480}{\micro\second} & 2083.3\,Hz & \\
+\textbf{4} & \textbf{\SI{960}{\micro\second}} & \textbf{1041.7\,Hz} & what ran on 2026-08-14 \\
+8 & \SI{1920}{\micro\second} & 520.8\,Hz & \\
+42 & \SI{10.08}{\milli\second} & 99.2\,Hz & equivalent averaging to Method A, at 100\% duty \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The last row is worth noting: streaming with \co{bin = 42} produces the same
+averaging as the recommended Method A operating point, at the same rate, but with
+100\% duty cycle instead of 21\% --- i.e. \emph{if the streaming noise defect were
+resolved}, streaming would dominate Method A at every rate.
+
+\section{Verification: the guarantees, checked on the data}
+
+Streaming's value is its exactness, so Step 5C checks it rather than assuming it.
+On the 2026-08-14 run:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrl@{}}
+\toprule
+\hd{Check} & \hd{Result} & \hd{Meaning} \\
+\midrule
+\co{rep_index} gaps & \textbf{0} & no reps dropped; cadence timestamps valid throughout \\
+\co{rep_index} step & 4, uniformly & host binning consistent, no straddled bins \\
+Duplicate rows & \textbf{0} of 31\,250 & the replay race really is absent \\
+Reps collected & 125\,000 / 125\,000 & nothing lost \\
+Packets & 152 & 38--500 reps each, median 205 \\
+Duty cycle & 100.0\% & the FPGA never idled \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\co{stream()} also now refuses to reshape a packet whose payload size does not
+match its own rep count. Such a packet would silently misalign every subsequent
+sample and mix the two parked frequencies together --- which would look exactly
+like a flat broadband noise excess. No occurrence has been observed, but it would
+previously have been invisible.
+
+\section{The buffer-overflow constraint}
+
+The board worker transfers in strides of roughly 10\% of the accumulated buffer and
+raises if unread samples reach \co{avg_maxlen}. \co{stream_headroom()} reports the
+actual margin at runtime rather than assuming it:
+
+\begin{center}
+\co{\{avg_maxlen, reads_per_shot, shots_that_fit, seconds_that_fit, worker_stride_shots\}}
+\end{center}
+
+At $\tau=\SI{120}{\micro\second}$ with one read per shot the cadence is
+$\sim$4\,kHz, so even a modest buffer allows a poll interval of order a second.
+No overflow has been observed, and the 500-sample first packet is no noisier than
+the 205-sample ones, which argues against overflow being behind the noise excess.
+
+\section{The PL droop}
+\label{sec:droop}
+
+\begin{openbox}[Real, and specific to this mode]
+With no gap between acquires the sample heats. On the 2026-08-14 run the PL fell
+\textbf{25\% over 30\,s}, smoothly, from 993 to 744 ADC counts.
+
+It is mostly common-mode and largely cancels in $z_+-z_-$: it is 85\% of the
+\emph{common-mode} variance but only \textbf{2.8\%} of the $\Delta f$ variance. But
+it walks the operating point down the flank, so the slopes the conversion assumes
+drift out of validity over the run.
+
+Step 5C detrends it (rolling median, corner $\sim f_s/\text{window}$) and reports
+the magnitude. The proper fix is a periodic re-zero during the run, which is not
+implemented.
+\end{openbox}
+
+\section{When to use it}
+
+For anything that needs a \emph{continuous} record above a few hundred Hz --- MCG,
+drone transients --- streaming is the only method that provides it: no gaps, exact
+timestamps, 100\% duty cycle. Its rate is proven.
+
+Its noise floor is currently $\sim$6$\times$ worse than burst, which for absolute
+sensitivity work makes burst the better choice today. \textbf{Resolving
+\S\ref{sec:streamnoise} is the single highest-value open item in this document},
+because it would make streaming better than both other methods at every operating
+point.

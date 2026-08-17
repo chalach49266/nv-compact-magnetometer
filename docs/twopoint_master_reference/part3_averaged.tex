@@ -1,0 +1,216 @@
+\chapter{Method A --- Averaged mode}
+\label{sec:avg}
+
+\begin{center}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+Notebook cell & Step 4A (analysis: Step 5A) \\
+Code path & \co{prog.acquire(progress=False)} \\
+One call returns & the \emph{mean} over \co{reps} reps: one sample \\
+Measured rate & \textbf{86.8--88.8\,Hz}, at every $\tau$ and rep count tested \\
+Rate limited by & the host call ($\sim$11.4\,ms), \emph{not} the readout window \\
+Duty cycle & 20.9\% at 10 reps, 48.3\% at 23 reps, 85.7\% at $\tau$=213/23 reps \\
+Measured floor & 274--501\,\etaunit\ (varies 1.8$\times$ between runs) \\
+Open defects & none \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Mechanics}
+
+The program runs \co{reps} repetitions. \co{analyze_results()} averages over the
+rep axis (Eq.~\ref{eq:divisions} divides by \co{reps}) and returns one number per
+parked frequency. The host then converts that pair into one $\Delta f$ and one CSV
+row, and immediately calls \co{acquire()} again.
+
+\paragraph{The cost of this design.} The rep axis is \emph{discarded}. Those
+\co{reps} repetitions were already independent time samples spaced by
+$t_\text{rep}$; averaging them away throws that time resolution out. Methods B and
+C exist to keep it.
+
+\section{Timing budget, component by component}
+\label{sec:avgbudget}
+
+Three operating points, all measured. Read the \textbf{Adds?} column first: it is
+what distinguishes this mode from the other two.
+
+\subsection*{Operating point 1: $\tau=\SI{120}{\micro\second}$, 10 reps --- what actually ran on 2026-08-14}
+
+\begin{center}
+\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.7cm}rrc>{\raggedright\arraybackslash}p{4.2cm}@{}}
+\toprule
+\hd{Component} & \hd{Time} & \hd{Share} & \hd{Adds?} & \hd{How obtained} \\
+\midrule
+ADC integration ($10\times\SI{240}{\micro\second}$)
+  & \SI{2.400}{\milli\second} & 20.9\% & \textcolor{bad}{no} & exact, Eq.~\ref{eq:recover}, $D$=368640 \\
+\quad of which MW pulse
+  & \SI{0}{\milli\second} & 0\% & no & concurrent with the readout \\
+\quad of which relax/sync
+  & $\sim$\SI{0}{\milli\second} & $\sim$0\% & no & absorbed; measured, \S\ref{sec:asm} \\
+\midrule
+\co{acquire()} call, fastest observed
+  & \SI{10.302}{\milli\second} & 89.8\% & --- & p05 of \co{acq_seconds} \\
+\co{acquire()} call, median
+  & \textbf{\SI{11.408}{\milli\second}} & \textbf{99.4\%} & \textbf{yes} & median of \co{acq_seconds} \\
+\co{acquire()} jitter (p95$-$p05)
+  & \SI{1.624}{\milli\second} & 14.2\% & yes & host/network scheduling \\
+\midrule
+Python outside \co{acquire()}
+  & \SI{0.067}{\milli\second} & 0.58\% & yes & period $-$ \co{acq_seconds} \\
+CSV flush stall (worst)
+  & \SI{215.8}{\milli\second} & --- & yes & 2 events $>3\times$ median period \\
+\midrule
+\textbf{TOTAL per sample} & \textbf{\SI{11.475}{\milli\second}} & 100\% & & $\rightarrow$ \textbf{87.1\,Hz} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{keybox}[Read this table as a maximum, not a sum]
+$2.400 + 11.408 = 13.8$\,ms, but the measured period is 11.475\,ms. The two do
+not add, because the ADC integration happens \emph{inside} stage 6 of the host
+chain (\S\ref{sec:rpc}). The period is
+\begin{align*}
+\text{period} &= \max\bigl(\text{host chain},\ \text{reps}\times t_\text{rep}\bigr)
+   \;+\; \text{Python outside} \\
+   &= \max(11.408,\ 2.400) + 0.067 \;=\; \SI{11.475}{\milli\second}.
+\end{align*}
+\textbf{Only \SI{2.400}{\milli\second} of every \SI{11.475}{\milli\second} is spent
+collecting photons.} The remaining 79\% is the host talking to the board.
+\end{keybox}
+
+\subsection*{Operating point 2: $\tau=\SI{120}{\micro\second}$, 23 reps}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+\hd{Component} & \hd{Time} & \hd{Share} & \hd{Note} \\
+\midrule
+ADC integration: $23\times\SI{240}{\micro\second}$ & \SI{5.520}{\milli\second} & 48.3\% & $D$=847872, exact \\
+\co{acquire()} call, fastest & \SI{10.266}{\milli\second} & 89.7\% & \\
+\co{acquire()} call, median & \SI{11.384}{\milli\second} & 99.5\% & \\
+\co{acquire()} jitter & \SI{1.819}{\milli\second} & 15.9\% & \\
+Python outside & \SI{0.056}{\milli\second} & 0.49\% & \\
+CSV flush stalls & \SI{0}{\milli\second} & --- & none in this run \\
+\midrule
+\textbf{TOTAL per sample} & \textbf{\SI{11.440}{\milli\second}} & 100\% & $\rightarrow$ \textbf{87.4\,Hz} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection*{Operating point 3: $\tau=\SI{213}{\micro\second}$, 23 reps --- the 2026-08-06 default}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+\hd{Component} & \hd{Time} & \hd{Share} & \hd{Note} \\
+\midrule
+ADC integration: $23\times\SI{426}{\micro\second}$ & \SI{9.798}{\milli\second} & 85.7\% & $D$=1504982, exact \\
+\co{acquire()} call, fastest & \SI{10.218}{\milli\second} & 89.4\% & \\
+\co{acquire()} call, median & \SI{11.369}{\milli\second} & 99.5\% & \\
+\co{acquire()} jitter & \SI{1.877}{\milli\second} & 16.4\% & \\
+Python outside & \SI{0.058}{\milli\second} & 0.51\% & \\
+CSV flush stall (worst) & \SI{219.5}{\milli\second} & --- & 4 events \\
+\midrule
+\textbf{TOTAL per sample} & \textbf{\SI{11.428}{\milli\second}} & 100\% & $\rightarrow$ \textbf{87.5\,Hz} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{The three side by side --- the decisive comparison}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+& \hd{$\tau$=120, 10 reps} & \hd{$\tau$=120, 23 reps} & \hd{$\tau$=213, 23 reps} & \hd{spread} \\
+\midrule
+ADC integration & \SI{2.400}{\milli\second} & \SI{5.520}{\milli\second} & \SI{9.798}{\milli\second} & \textbf{4.1$\times$} \\
+Period          & \SI{11.475}{\milli\second} & \SI{11.440}{\milli\second} & \SI{11.428}{\milli\second} & \textbf{1.004$\times$} \\
+Rate            & 87.1\,Hz & 87.4\,Hz & 87.5\,Hz & 1.005$\times$ \\
+Duty cycle      & 20.9\% & 48.3\% & 85.7\% & 4.1$\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{keybox}[This one row is the whole finding]
+The ADC integration time varies by \textbf{4.1$\times$} across these three
+operating points. The period varies by \textbf{0.4\%}. There is no readout-window
+or rep-count setting that makes this mode faster than $\sim$88\,Hz.
+\end{keybox}
+
+\section{The CSV flush, and why it was fixed}
+
+The worst single stall in these runs is \SI{219.5}{\milli\second} --- nineteen
+missed samples. The cause was the old save routine calling
+\co{pd.DataFrame(rows).to_csv(...)} every 5 seconds, rewriting \emph{every row
+collected so far}: $O(N^2)$ over a run. Of the 94 outlier batches across the
+2026-08-06 session, \textbf{46 sat within 150\,ms of a 5-second boundary}.
+
+Replaced by \co{twopoint_runner.IncrementalCsvWriter}, which appends only the new
+rows (header once). On a 40\,000-row run this is 10.2$\times$ cheaper and the
+stall is flat with run length instead of growing.
+
+\section{What to set}
+
+\begin{center}
+\small
+\begin{tabular}{@{}llp{7.4cm}@{}}
+\toprule
+\hd{Parameter} & \hd{Recommended} & \hd{Why} \\
+\midrule
+\co{AVG_REPS_PER_BATCH} & \co{None} & Fills the measured call floor automatically
+  via \co{reps_that_fit()}. At $\tau$=120 that is \textbf{42 reps}, against the 10
+  actually used --- see \S\ref{sec:freeavg}. \\
+\co{AVG_CALIBRATE_FLOOR} & \co{True} & Measures the floor on this rig at startup;
+  it already differs by 1.2\,ms between the two sessions. Costs $\sim$0.3\,s. \\
+\co{readout_integration_tus} & 120 & Inside the flat sensitivity band
+  (\S\ref{sec:window}). Not a rate lever here. \\
+\co{AVG_PAIR_ORDER} & \co{"forward"} & \co{"abba"} is free at equal averaging but
+  untested (\S\ref{sec:abba}). \\
+\co{AVG_SKIP_REFERENCE} & \co{True} & The MW-off reference is contaminated on this
+  setup. \\
+\co{AVG_SHOW_PLOT} & \co{False} & A live 3-panel redraw costs 20--100\,ms, which
+  at an 11\,ms period would dominate the loop. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Failure modes and what warns you}
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{4.6cm}p{5.2cm}p{4.6cm}@{}}
+\toprule
+\hd{Failure} & \hd{Symptom} & \hd{Guard} \\
+\midrule
+Resonance drifts off the parked pair &
+  Dip depth collapses, $\sigma(\Delta f)$ grows as $1/$depth (Eq.~\ref{eq:noise}) &
+  \co{report_calibration_validity()} prints measured vs calibrated depth and
+  depth/noise; warns below 50\% or ratio $<3$ \\
+60\,Hz mains &
+  Appears at 26.8--28.8\,Hz, indistinguishable from signal &
+  \co{alias_report()} in Step 5A; \textbf{cannot be removed} (\S\ref{sec:alias}) \\
+Averaging does not help &
+  $\sigma$ gets \emph{worse} with more reps &
+  \Open{} --- see \S\ref{sec:notshot} \\
+Peaking transient &
+  Per-batch transient from an MW polarisation pulse at each batch boundary &
+  \co{pre_init=False} on the live program, enforced by \co{assert}; primed once
+  with a throwaway \co{pre_init=True} acquire \\
+Stale buffer &
+  Would show as a bit-identical repeat &
+  Freshness guard; \textbf{zero occurrences} in 20\,365 averaged batches \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{When to use it}
+
+When $\sim$88\,Hz is enough. It is the only one of the three methods with no open
+defect, its timestamps are honest, and it has never been observed to replay a
+buffer. For drone sensing and MCG, where bandwidth is the point, it is the wrong
+choice --- go to Method B or C.

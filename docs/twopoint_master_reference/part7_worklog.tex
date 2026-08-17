@@ -1,0 +1,453 @@
+\chapter{Work log: what has been changed and pushed}
+\label{ch:worklog}
+
+Repository: \file{github.com/chalach49266/nv-compact-magnetometer}, branch
+\co{main}. All commits below are pushed. The two sessions are separated because the
+second one partly retracts the first.
+
+\section{Round 1 --- 2026-08-12, against the 2026-08-06 session}
+
+\begin{center}
+\small
+\begin{tabular}{@{}llp{8.6cm}@{}}
+\toprule
+\hd{Commit} & \hd{Scope} & \hd{What it did} \\
+\midrule
+\co{5ea75ab} & \co{data:} & 2026-08-06 session snapshot (drone sweeps, burst runs,
+  17-point integration-time scan). \\
+\co{50fe514} & \co{docs:} & The timing \& noise analysis, plus
+  \co{analyze_twopoint_session.py} and \co{profile_twopoint_acquire.py}. \\
+\co{942d9e8} & \co{perf:} & Corrected the \co{config_all} keyword; $\tau$ 213
+  $\rightarrow$ \SI{120}{\micro\second}; added ABBA ordering; append-only CSV writer. \\
+\co{6765284} & \co{fix:} & \co{MultipointLockinODMR.stream()} --- the continuous
+  streaming path. \\
+\co{9eed2e1} & \co{feat:} & \co{clean_burst_lockin.py}, to salvage burst runs already
+  recorded. \\
+\co{16fd9ba} & \co{docs:} & Changelog, rig checklist, cross-references. \\
+\co{f700223} & \co{fix:} & Sensitivity omitted the $\sqrt{\text{reps}}$ factor,
+  understating $\eta$ by $\sim$10$\times$. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Scorecard on round 1.} Of the four changes intended to improve things:
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{6.0cm}lp{6.4cm}@{}}
+\toprule
+\hd{Change} & \hd{Outcome} & \hd{Verdict} \\
+\midrule
+$\tau$ 213 $\rightarrow$ \SI{120}{\micro\second} & \Partial &
+  Took effect and is right for sensitivity, but bought \textbf{no rate} --- the
+  premise that $\tau$ set the rate was wrong. \\
+\co{config_all} fix + \co{reset_tproc} & \Open &
+  Real bug, correctly fixed, but \textbf{did not stop the replay}. \\
+\co{stream()} & \Done &
+  Works: \textbf{1041.7\,Hz}, gapless. Its noise is a new open defect. \\
+Append-only CSV writer & \Done &
+  Removed the 25--220\,ms periodic stalls. \\
+ABBA ordering & \Open & Implemented, never tested on hardware. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Round 2 --- 2026-08-16/17, against the 2026-08-14 session}
+
+\begin{center}
+\small
+\begin{tabular}{@{}llp{8.2cm}@{}}
+\toprule
+\hd{Commit} & \hd{Scope} & \hd{What it did} \\
+\midrule
+\co{a98fd2f} & \co{data:} &
+  2026-08-14 session (101\,MB): four averaged runs, one stream run, one burst run
+  all at $\tau$=\SI{120}{\micro\second}; a 12-point integration-time sweep
+  (1--\SI{213}{\micro\second}, 5 repeats each); an 8-peak reference sweep; a
+  multipoint run. Committed \emph{before} any code change, so the analysis has a
+  fixed baseline. \\[3pt]
+\co{6eb7eb5} & \co{docs:} &
+  \textbf{Retraction} of the ``rate is FPGA-bound'' conclusion in the 2026-08-06
+  document, with the evidence, plus marking \S4.3's root cause disproved. \\[3pt]
+\co{524dbb4} & \co{feat:} &
+  \file{twopoint_spectra.py} (365 lines) and \file{twopoint_postprocess.py}
+  (790 lines); \co{clean_burst_lockin.py} rewritten to delegate. Found and fixed the
+  per-channel despiking bug and the 12\% burst-cadence error. \\[3pt]
+\co{6893bcb} & \co{perf:} &
+  Corrected rate model (\co{HOST_CALL_S}/\co{HOST_FLOOR_S} replacing
+  \co{HOST_OVERHEAD_S}); \co{reps_that_fit()}; \co{measure_host_floor()};
+  \co{multipoint_on_stale="drop"}; \co{stream()} sequence aligned with
+  \co{acquire()} and packet-size validation. \\[3pt]
+\co{8fd303f} & \co{refactor:} &
+  Notebook split into Step 4A/5A, 4B/5B, 4C/5C, Step 6. New
+  \file{twopoint_runner.py} (236 lines) for the shared plumbing. 1497 lines of
+  notebook changed. \\[3pt]
+\co{68e95a9} & \co{feat:} &
+  Three rig tests: \co{--compare-read-paths}, \co{--stream-scan}, \co{--floor}. \\[3pt]
+\co{f1bd0eb} & \co{docs:} &
+  The 2026-08-14 methods document, \co{analyze_twopoint_0814.py}, five generated
+  tables and three figures; pointer fixes in \co{LOCKIN_ACQUIRE.md} and
+  \co{twopoint_lockin_notes.md}. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{The notebook layout}
+\label{sec:notebook}
+
+\file{Modules/Twopoint_Lockin_module.ipynb}, 32 cells. Step 4 used to be a single
+26\,kB cell with a \co{LIVE_BURST_MODE} switch, and Step 5 a single generic analysis
+cell that treated all three methods alike --- which is wrong in a different way for
+each of them.
+
+\begin{center}
+\small
+\begin{tabular}{@{}clp{8.4cm}@{}}
+\toprule
+\hd{Cells} & \hd{Section} & \hd{Contents} \\
+\midrule
+0--8   & setup, ODMR sweep & project root, \co{default_config} ($\tau$ set here),
+  DSA attenuation, the reference ODMR sweep \\
+9--12  & Step 1a / 1b & pick the peak to track; place the parked pair and build
+  \co{TWOPOINT_CALIB} (this is where the slopes and baselines come from) \\
+13--16 & Step 2 / 3 & one batch at the two parked frequencies; apply the conversion \\
+\midrule
+17--18 & \textbf{Step 4A} & averaged acquisition. Measures the host floor, sizes
+  \co{reps} to fill it, prints the alias warning \\
+19--20 & Step 5A & \co{process_averaged} + ASD, $\sim$15 lines \\
+21--22 & \textbf{Step 4B} & burst acquisition, \co{on_stale="drop"}, cadence-based
+  timestamps, reports \co{BURST_STALE_FRACTION} \\
+23--24 & Step 5B & \co{process_burst} + per-segment ASD \\
+25--26 & \textbf{Step 4C} & streaming acquisition, \co{stream_qc()} assertions \\
+27--28 & Step 5C & \co{process_stream} + ASD, optional mains notch \\
+29--30 & Step 6 & post-process \emph{any} saved run; mode detected from the columns;
+  side-by-side comparison table \\
+31     & Caveats & what the method does and does not measure \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Each Step 4x is self-contained --- it builds its own program, primes, auto-zeroes and
+writes its own CSV --- with the parameters that change run to run inline, where they
+are edited. Each Step 5x reads the run its partner just wrote. The shared mechanical
+plumbing (append-only CSV writer, row building, the timing/freshness/calibration
+reports, the standard figure) lives in \file{notebook_modules/twopoint_runner.py} so
+that 4A and 4B do not carry 150 duplicated lines each.
+
+\section{The code, file by file}
+\label{sec:filemap}
+
+\begin{center}
+\small
+\begin{longtable}{@{}p{5.0cm}p{2.0cm}p{7.2cm}@{}}
+\toprule
+\hd{File} & \hd{State} & \hd{Role} \\
+\midrule
+\endhead
+\multicolumn{3}{@{}l}{\emph{Acquisition}} \\
+\file{notebook_modules/} \file{multipoint_lockin_program.py} & modified &
+  The FPGA program, all three read paths, the timing model, the freshness guard. \\
+\file{qickdawg/nvpulsing/} \file{nvaverageprogram.py} & modified &
+  Vendored; the \co{config_all} fix and \co{reset_tproc} plumbing. \\
+\file{Modules/} \file{Twopoint_Lockin_module.ipynb} & restructured &
+  32 cells: setup, ODMR, Steps 1--3, then 4A/5A, 4B/5B, 4C/5C, 6. \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{Analysis (new)}} \\
+\file{notebook_modules/} \file{twopoint_spectra.py} & \textbf{new} &
+  Every FFT. One-sided PSD, $\eta=\sigma\sqrt{2\Delta t}$, mains-line finder,
+  alias report, comb notch. Verified against Parseval. \\
+\file{notebook_modules/} \file{twopoint_postprocess.py} & \textbf{new} &
+  One pipeline per mode + mode detection + exact readout-quantum recovery + CLI. \\
+\file{notebook_modules/} \file{twopoint_runner.py} & \textbf{new} &
+  Shared acquisition plumbing: append-only CSV, row building, the three reports,
+  the standard figure. \\
+\file{notebook_modules/burst_qc.py} & reused &
+  Batch table, stale masks, retiming, segment PSD, block averaging. \\
+\file{notebook_modules/} \file{spike_rejection.py} & reused &
+  \co{HampelDespiker}. \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{Scripts}} \\
+\file{scripts/} \file{analyze_twopoint_0814.py} & \textbf{new} &
+  Regenerates every number and figure in this document. \\
+\file{scripts/} \file{profile_twopoint_acquire.py} & modified &
+  Static signature check + per-RPC timing + the three rig tests. \\
+\file{scripts/} \file{clean_burst_lockin.py} & rewritten &
+  Burst CLI, now delegating to \co{twopoint_postprocess}. \\
+\file{scripts/} \file{analyze_twopoint_session.py} & unchanged &
+  The 2026-08-06 analysis; still regenerates that document. \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{Documents}} \\
+\file{docs/twopoint_master_reference/} & \textbf{new} & This document. \\
+\file{docs/} \file{2026-08-14_twopoint_methods/} & new & Markdown source + generated tables/figures. \\
+\file{docs/} \file{2026-08-06_twopoint_timing/} & annotated & The earlier analysis, with corrections marked in place. \\
+\file{docs/LOCKIN_ACQUIRE.md} & pointer fixed & Repeated the retracted 1.6\,ms figure. \\
+\file{docs/} \file{twopoint_lockin_notes.md} & pointer fixed & Same. \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\section{Wiki}
+
+The synthesis is filed in the Obsidian vault at \file{NV Project/}.
+
+\begin{itemize}
+  \item \textbf{New page:} \file{wiki/sources/twopoint_three_modes_2026_08_14.md}
+  \item \textbf{Correction banner:} \file{wiki/sources/twopoint_timing_and_burst_defect.md}
+  \item \textbf{Updated:} \file{wiki/experiments/lockin_tracking.md} (new
+        ``August 14--17'' section, and the August 6--12 one partly retracted);
+        \file{wiki/concepts/sensitivity.md} (three new rows, plus a warning that the
+        two-point noise does not average down);
+        \file{wiki/questions/open_questions.md} (three questions answered, four new
+        ones with pass criteria); \file{wiki/overview.md} (status table and the
+        ``Where We Stand'' list); \file{index.md} (routing).
+  \item \textbf{Log entry:} \file{log.md}, dated 2026-08-17.
+\end{itemize}
+
+\emph{Not} committed to git: the vault sits inside the home-directory repository,
+which contains unrelated and sensitive untracked files. The files are on disk and
+sync through OneDrive.
+
+
+\chapter{What still needs to be done}
+\label{ch:todo}
+
+\section{Rig checks, in priority order}
+\label{sec:rigchecks}
+
+Everything here needs the RFSoC at 192.168.0.103, reachable only from the Windows
+rig machine. Each has a pass criterion.
+
+\begin{center}
+\small
+\begin{longtable}{@{}p{0.7cm}p{4.6cm}p{4.4cm}p{4.6cm}@{}}
+\toprule
+\hd{\#} & \hd{Check} & \hd{Command} & \hd{Pass criterion} \\
+\midrule
+\endhead
+S1 & \textbf{Burst vs stream, interleaved.} Decides whether the $\sim$6$\times$
+  streaming excess is the read path or the room. \emph{Do this first.} $\sim$1\,min. &
+  \co{profile_twopoint_acquire.py --compare-read-paths --tau 120 --reps 500} &
+  ASD ratio within \textbf{1.25$\times$} $\Rightarrow$ environment. Well above
+  $\Rightarrow$ software defect. \\[3pt]
+S2 & Does the streaming excess grow with run length (buffer fill)? &
+  \co{profile_twopoint_acquire.py --stream-scan} &
+  Floor at 125\,k reps within \textbf{1.3$\times$} of the floor at 2\,k reps. \\[3pt]
+S3 & Confirm the per-call floor and the flat rate. &
+  \co{profile_twopoint_acquire.py --floor --tau 120 --reps 1 4 10 23 42 100} &
+  Fastest call \textbf{9--11.5\,ms} with a \co{reps=1} probe; period flat to
+  \textbf{15\%} across reps whose FPGA work fits under it. \\[3pt]
+S4 & \textbf{Fill in \S\ref{sec:rpc}} --- the per-RPC split, the one structural gap
+  in this document. &
+  \co{profile_twopoint_acquire.py --ip 192.168.0.103} &
+  A time for each of stages 1--7. No pass/fail; this is a measurement that has never
+  been made. \\[3pt]
+S5 & Free averaging. 30\,s Step 4A with \co{AVG_REPS_PER_BATCH = None}. &
+  Notebook Step 4A &
+  Still $\sim$88\,Hz \emph{and} $\sigma(\Delta f)\le$ \textbf{54.6\,kHz}. Given
+  \S\ref{sec:notshot}, expect less than the naive 2$\times$. \\[3pt]
+S6 & \textbf{The per-acquire noise term.} Interleave averaged runs at reps =
+  10 / 23 / 42 within one sitting. &
+  Notebook Step 4A, three configs, alternating &
+  Does $\sigma$ fall as $1/\sqrt{\text{reps}}$? If not, the term is per-call --- then
+  test whether it tracks the idle gap by varying \co{SAVE_EVERY_SEC} or inserting a
+  deliberate sleep. \\[3pt]
+S7 & ABBA A/B at fixed $\tau$ and equal averaging (\co{"forward"} 46 reps vs
+  \co{"abba"} 23 reps), interleaved. &
+  Notebook Step 4A, two configs &
+  Report the change in $\sigma(\Delta f)$. Any reduction is free. \\[3pt]
+S8 & Honest burst rate with the drop policy. 10\,s Step 4B. &
+  Notebook Step 4B, \co{BURST_ON_STALE="drop"} &
+  Step 5B reports \textbf{\co{n_stale_batches} = 0} on the file Step 4B just wrote,
+  and \co{BURST_STALE_FRACTION} is printed. \\[3pt]
+S9 & Instrument the replay. Print the shot counter and queue depth before/after each
+  \co{start_readout} during a burst run. &
+  needs a small patch to \co{acquire()} &
+  Discriminates the three candidate mechanisms in \S\ref{sec:replay}. \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\section{Software backlog}
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{5.4cm}lp{7.2cm}@{}}
+\toprule
+\hd{Item} & \hd{Priority} & \hd{Why} \\
+\midrule
+Periodic re-zero during a streaming run & high &
+  The 25\% PL droop (\S\ref{sec:droop}) walks the operating point off the
+  calibrated flank over 30\,s. Currently only detrended in post. \\
+Root-cause the burst replay & high &
+  Would recover $\sim$15\% of burst rate and remove the need for the drop policy. \\
+Real-time mains notch in the acquisition path & medium &
+  The current notch is offline, non-causal, and assumes stationarity. At $\ge$1\,kHz a
+  causal notch is feasible and the line is 10$\times$ the floor. \\
+Fold the multipoint notebook onto the same modules & medium &
+  \file{twopoint_spectra.py} and \file{twopoint_postprocess.py} are mode-generic;
+  the multipoint path still has its own analysis code. \\
+Calibrated field reference & medium &
+  Every $\eta$ here is a readout-chain figure (\S\ref{sec:notaclaim}). A known
+  applied field would turn them into system claims. \\
+\co{remove_offset} is documented but not implemented & low &
+  \co{NVAveragerProgram.acquire()} accepts the argument and never uses it. Harmless
+  today (both paths are consistent) but a latent trap. \\
+Allan deviation on the long runs & low &
+  Needed for the drift/averaging-time story; the June time-integration data exists
+  but has not been analysed drift-aware. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Recommended operating point today}
+
+\begin{keybox}[Until S1 resolves the streaming question]
+\begin{description}[leftmargin=1.4em,style=nextline]
+  \item[For best sensitivity --- Method B, burst.] $\tau=\SI{120}{\micro\second}$,
+  \co{BURST_REPS = 500}, \co{BURST_ON_STALE = "drop"}. 38\,\etaunit\ at an effective
+  3.1\,kHz. Accept the $\sim$15\,ms gap every 135\,ms.
+  \item[For a continuous trace --- Method C, streaming.] $\tau=\SI{120}{\micro\second}$,
+  \co{STREAM_TARGET_HZ = 1000}. 1041.7\,Hz, gapless, exact timestamps, but
+  $\sim$6$\times$ the noise until \S\ref{sec:streamnoise} is closed.
+  \item[For slow work and sanity checks --- Method A, averaged.]
+  $\tau=\SI{120}{\micro\second}$, \co{AVG_REPS_PER_BATCH = None} so the call floor is
+  filled. $\sim$88\,Hz, no open defects --- but remember 60\,Hz is aliased into the
+  band here.
+\end{description}
+\end{keybox}
+
+
+\chapter{Corrections register}
+\label{ch:retractions}
+
+Every claim from an earlier document that this one contradicts, in one place.
+
+\begin{center}
+\small
+\begin{longtable}{@{}p{3.2cm}p{4.6cm}p{4.6cm}p{2.4cm}@{}}
+\toprule
+\hd{Source} & \hd{Earlier claim} & \hd{Current position} & \hd{Evidence} \\
+\midrule
+\endhead
+2026-08-06 doc \S1, \S2 &
+  ``The rate is FPGA-bound, not host-bound''; host round-trip $\sim$1.6\,ms &
+  \textbf{Retracted.} Host-bound, $\sim$10--11.4\,ms per call; the FPGA runs
+  underneath it &
+  \S\ref{sec:floorevidence} \\[3pt]
+2026-08-06 doc \S2.6 &
+  $\tau$ is ``the main lever''; \co{reps} trades against rate one for one &
+  \textbf{Both backwards.} Neither affects the rate below the floor; \co{reps} is a
+  free \emph{sensitivity} lever &
+  \S\ref{sec:knobs} \\[3pt]
+2026-08-06 doc \S2.4 &
+  ``Host round-trip 1.60\,ms (14.1\%)'' as a budget row &
+  That was a \emph{residual} under an assumed serial model, not a measurement &
+  \S\ref{sec:floorevidence} \\[3pt]
+2026-08-06 doc \S4.3 &
+  \co{config_all} / never-stopped tProc is the root cause of the burst replay &
+  \textbf{Disproved.} The fix was applied and 49.9\% still replayed &
+  \S\ref{sec:replay} \\[3pt]
+2026-08-06 doc \S3.2 &
+  ``No 60\,Hz line, no discrete tones'' &
+  The line is there and is 10$\times$ the floor; at 87.5\,Hz it is \emph{aliased} to
+  $\sim$28\,Hz and the burst runs that could have resolved it were half replays &
+  \S\ref{sec:alias} \\[3pt]
+2026-08-06 doc, 1st draft &
+  $\eta \approx 19$\,\etaunit\ per rep &
+  185\,\etaunit. The draft paired a reps-averaged $\sigma$ with a single-rep time,
+  omitting $\sqrt{\text{reps}}\approx 10$ &
+  \S\ref{sec:conventions} \\[3pt]
+2026-08-06 doc, $\eta$ convention &
+  $\eta = \sigma_B\sqrt{\Delta t}$ &
+  $\eta = \sigma_B\sqrt{2\Delta t}$, matching what the notebook prints; a
+  $\sqrt{2}$ difference &
+  \S\ref{sec:conventions} \\[3pt]
+2026-08-14 doc, 1st draft &
+  Streaming excess is ``4.2$\times$'' &
+  5.3--6.3$\times$. The 4.2 used the \emph{raw} burst floor; the cleaned floor is
+  38.6 rather than 55\,\etaunit &
+  \S\ref{sec:streamnoise} \\[3pt]
+Notebook Step 4 comment, pre-2026-08-12 &
+  ``$\sim$10\,ms of fixed host overhead, FPGA work that fits inside it is FREE'' &
+  \textbf{Substantially correct}, and wrongly ``corrected'' on 2026-08-12. Restored &
+  \S\ref{sec:model} \\[3pt]
+\co{time_per_rep()}, pre-2026-08-12 &
+  $n_\text{slots}\times(\tau + 2\,t_\text{relax})$ &
+  $n_\text{slots}\times\tau$; the relax windows are absorbed &
+  \S\ref{sec:asm} \\[3pt]
+Burst cadence, pre-2026-08-16 &
+  From \co{acq_seconds/n_samples}: \SI{269}{\micro\second} &
+  \SI{240.0}{\micro\second} exactly, from the readout quantum. The old value
+  included the host share &
+  \S\ref{sec:quantum} \\[3pt]
+Despiking, pre-2026-08-16 &
+  Filter the two parked channels independently &
+  Filter the \emph{differential}. Per-channel raises $\sigma$ &
+  \S\ref{sec:despikebug} \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\begin{keybox}[The methodological lesson]
+Four of the twelve rows above come from the same mistake: \textbf{fitting a model
+with $n$ free parameters to data taken at one operating point}. The 2026-08-06
+session ran at a single $(\tau, \text{reps})$, and every timing conclusion drawn
+from it was under-determined --- the serial-versus-overlapped question simply cannot
+be answered from one point, however carefully the residuals are computed.
+
+The 2026-08-14 session settled it in an afternoon purely by varying two knobs. Any
+future timing claim should span at least three operating points before it is
+written down.
+\end{keybox}
+
+
+\chapter{Reproducing everything}
+
+\section{Offline, no hardware}
+
+\begin{quote}\small\ttfamily
+\# every number and figure in this document\\
+python scripts/analyze\_twopoint\_0814.py\\[4pt]
+\# post-process any run; the mode is detected from the columns\\
+python -m twopoint\_postprocess <csv> [-{}-outdir DIR] [-{}-notch-mains]\\[4pt]
+\# burst-specific CLI with the original flags\\
+python scripts/clean\_burst\_lockin.py <live\_csv> -{}-outdir analysis/\\[4pt]
+\# the 2026-08-06 analysis, unchanged\\
+python scripts/analyze\_twopoint\_session.py\\[4pt]
+\# static check of the config\_all signature\\
+python scripts/profile\_twopoint\_acquire.py -{}-check-only\\[4pt]
+\# rebuild this document\\
+cd docs/twopoint\_master\_reference \&\& latexmk -pdf TWOPOINT\_MASTER\_REFERENCE.tex
+\end{quote}
+
+\section{On the rig}
+
+\begin{quote}\small\ttfamily
+python scripts/profile\_twopoint\_acquire.py -{}-floor -{}-tau 120\\
+python scripts/profile\_twopoint\_acquire.py -{}-compare-read-paths -{}-tau 120 -{}-reps 500\\
+python scripts/profile\_twopoint\_acquire.py -{}-stream-scan\\
+python scripts/profile\_twopoint\_acquire.py -{}-ip 192.168.0.103\\
+\hspace*{2em}\# the full per-RPC profile (fills section~\ref{sec:rpc})
+\end{quote}
+
+\section{Data used by this document}
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{6.4cm}p{8.0cm}@{}}
+\toprule
+\hd{Path} & \hd{Contents} \\
+\midrule
+\file{data/results/} \file{081426 (Sensitivity increase update)/} &
+  2026-08-14: 4 averaged + 1 stream + 1 burst two-point run, all at
+  $\tau$=\SI{120}{\micro\second}; 12-point integration sweep; 8-peak reference sweep;
+  multipoint run. 101\,MB. \\
+\file{data/twopoint_lockin/08062026/} &
+  2026-08-06: drone sweeps, 4 burst runs, 12 averaged runs, 17-point integration
+  sweep (92 ODMR sweeps). \\
+\file{docs/2026-08-14_twopoint_methods/} \file{tables/} &
+  Generated: \co{timing.csv}, \co{mode_budgets.csv}, \co{modes.csv},
+  \co{read_path.csv}, \co{per_rep_noise.csv}, \co{spectra.csv}. \\
+\bottomrule
+\end{tabular}
+\end{center}

@@ -1,0 +1,42 @@
+mode,config,component,ms,per,note
+averaged,"tau=120, 10 reps",ADC integration (reps x cadence),2.4,sample,"exact; runs INSIDE the call, does not add"
+averaged,"tau=120, 10 reps","acquire() call, fastest",10.30193999249603,sample,upper bound on the host-chain floor
+averaged,"tau=120, 10 reps","acquire() call, median",11.40789999772095,sample,measured; this is what sets the rate
+averaged,"tau=120, 10 reps",acquire() jitter (p95-p05),1.6235900126048417,sample,host/network scheduling
+averaged,"tau=120, 10 reps",Python outside acquire(),0.06719999510452723,sample,"row build, conversion, hist"
+averaged,"tau=120, 10 reps",CSV flush stalls,215.76979999372446,worst event,2 events above 3x the median period
+averaged,"tau=120, 10 reps",TOTAL per sample,11.475099992825477,sample,-> 87.1 Hz
+averaged,"tau=120, 10 reps",duty cycle,20.91485042832342,percent,fraction of wall clock spent integrating
+averaged,"tau=120, 23 reps",ADC integration (reps x cadence),5.52,sample,"exact; runs INSIDE the call, does not add"
+averaged,"tau=120, 23 reps","acquire() call, fastest",10.265959997923314,sample,upper bound on the host-chain floor
+averaged,"tau=120, 23 reps","acquire() call, median",11.383750003005801,sample,measured; this is what sets the rate
+averaged,"tau=120, 23 reps",acquire() jitter (p95-p05),1.8188249938247747,sample,host/network scheduling
+averaged,"tau=120, 23 reps",Python outside acquire(),0.05634998524332957,sample,"row build, conversion, hist"
+averaged,"tau=120, 23 reps",CSV flush stalls,0.0,worst event,0 events above 3x the median period
+averaged,"tau=120, 23 reps",TOTAL per sample,11.44009998824913,sample,-> 87.4 Hz
+averaged,"tau=120, 23 reps",duty cycle,48.251326523981,percent,fraction of wall clock spent integrating
+averaged,"tau=213, 23 reps",ADC integration (reps x cadence),9.798059895833335,sample,"exact; runs INSIDE the call, does not add"
+averaged,"tau=213, 23 reps","acquire() call, fastest",10.21842001355248,sample,upper bound on the host-chain floor
+averaged,"tau=213, 23 reps","acquire() call, median",11.3694999890867,sample,measured; this is what sets the rate
+averaged,"tau=213, 23 reps",acquire() jitter (p95-p05),1.8769399845041566,sample,host/network scheduling
+averaged,"tau=213, 23 reps",Python outside acquire(),0.05820000660611946,sample,"row build, conversion, hist"
+averaged,"tau=213, 23 reps",CSV flush stalls,219.47119999094866,worst event,4 events above 3x the median period
+averaged,"tau=213, 23 reps",TOTAL per sample,11.42769999569282,sample,-> 87.5 Hz
+averaged,"tau=213, 23 reps",duty cycle,85.73956176243945,percent,fraction of wall clock spent integrating
+burst,"tau=120, 500 reps, 500 reps",ADC integration (reps x cadence),120.00000000000001,burst,"500 reps x 240.0 us, exact"
+burst,"tau=120, 500 reps, 500 reps",host RPC chain,14.696950000943545,burst,serial here: the call waits for all reps
+burst,"tau=120, 500 reps, 500 reps","acquire() total, real burst",134.69695000094356,burst,measured
+burst,"tau=120, 500 reps, 500 reps",stale replay acquire,12.532599997939501,burst,x185 batches = 2.32 s wasted
+burst,"tau=120, 500 reps, 500 reps",TOTAL per usable sample,0.3237289703354981,sample,"-> 3089 Hz net, 4167 Hz in-burst"
+burst,"tau=120, 500 reps, 500 reps",duty cycle,74.13608975164468,percent,fraction of wall clock spent integrating
+burst,"tau=213, 500 reps",ADC integration (reps x cadence),213.00130208333331,burst,"500 reps x 426.0 us, exact"
+burst,"tau=213, 500 reps",host RPC chain,0.0,burst,below the 2.13 ms resolution of timing a 213 ms call; <1% of the burst
+burst,"tau=213, 500 reps","acquire() total, real burst",212.2671999968588,burst,measured
+burst,"tau=213, 500 reps",stale replay acquire,12.6483000058215,burst,x106 batches = 1.34 s wasted
+burst,"tau=213, 500 reps",TOTAL per usable sample,0.5137829026000319,sample,"-> 1946 Hz net, 2347 Hz in-burst"
+burst,"tau=213, 500 reps",duty cycle,82.91490472159597,percent,fraction of wall clock spent integrating
+stream,"tau=120, bin 4",ADC integration (bin x cadence),0.9600000000000001,output sample,"4 reps x 240.0 us, exact"
+stream,"tau=120, bin 4",host RPC chain,0.0,output sample,"paid once for the whole run, not per sample"
+stream,"tau=120, bin 4",timestamp jitter,3.552713678800501e-12,output sample,"cadence-derived, so zero by construction"
+stream,"tau=120, bin 4",TOTAL per output sample,0.9599999999991837,output sample,measured; predicted 0.960 ms
+stream,"tau=120, bin 4",duty cycle,100.00320010240327,percent,125000 reps x 240 us over 29.999 s

@@ -1,0 +1,73 @@
+\input{preamble}
+
+\begin{document}
+
+% ------------------------------------------------------------------ title
+\begin{titlepage}
+\centering
+\vspace*{2.4cm}
+{\Huge\bfseries\color{accent} Two-Point Parked Lock-In\par}
+\vspace{0.5cm}
+{\LARGE\color{accent} Master Reference\par}
+\vspace{1.1cm}
+{\large Acquisition methods $\cdot$ timing breakdown $\cdot$ sensitivity\\
+open defects $\cdot$ work log\par}
+\vspace{2.0cm}
+
+\begin{minipage}{0.82\textwidth}
+\small
+\raggedright
+\textbf{Project} \quad NV compact magnetometer, RFSoC4x2 + QICK-DAWG\\
+\textbf{Repository} \quad \file{nv_magnetometer_project}, branch \co{main}\\
+\textbf{Sessions covered} \quad 2026-08-04, 2026-08-06, 2026-08-14\\
+\textbf{Written} \quad 2026-08-17\\[0.7em]
+\textbf{Supersedes} \quad
+\file{docs/2026-08-06_twopoint_timing/TIMING_AND_NOISE_ANALYSIS.md} and
+\file{docs/2026-08-14_twopoint_methods/TWOPOINT_METHODS_AND_TIMING.md},
+both of which remain in the repository as the record of what was believed when.
+Chapter~\ref{ch:retractions} lists every disagreement.\\[0.7em]
+\textbf{Regenerate every number} \quad \co{python scripts/analyze_twopoint_0814.py}
+\end{minipage}
+
+\vfill
+
+\begin{minipage}{0.82\textwidth}
+\begin{keybox}[The three findings, in one paragraph each]
+\small
+\textbf{Rate.} An \co{acquire()} call costs 10--11.4\,ms of host round-trip whatever
+the program does, and the FPGA work runs underneath it. Halving the readout window
+cut the FPGA work by 4$\times$ and changed the rate by 0.4\%. The averaged mode
+therefore sits at $\sim$88\,Hz at any setting, and averaging is \emph{free} up to the
+call floor.
+
+\textbf{Sensitivity.} The reference-photodiode fix bought \textbf{4.1$\times$}: the
+burst-mode noise floor went from 158 to \textbf{38\,\etaunit}. Burst is the best
+operating point available today.
+
+\textbf{Bandwidth.} Streaming delivers \textbf{1041.7\,Hz} with a gapless,
+duplicate-free rep axis --- the 1\,kHz target is met. Its noise floor is
+$\sim$6$\times$ the burst floor for reasons not yet identified, which is the single
+highest-value open item.
+\end{keybox}
+\end{minipage}
+
+\vspace{1.2cm}
+{\small\color{rulegrey} Chalach Kasemtantikul\par}
+\end{titlepage}
+
+% ------------------------------------------------------------------ contents
+\tableofcontents
+\clearpage
+
+% ------------------------------------------------------------------ body
+\input{part1_orientation}
+\input{part2_common}
+\input{part3_averaged}
+\input{part3_burst}
+\input{part3_stream}
+\input{part4_timing}
+\input{part5_sensitivity}
+\input{part6_defects}
+\input{part7_worklog}
+
+\end{document}

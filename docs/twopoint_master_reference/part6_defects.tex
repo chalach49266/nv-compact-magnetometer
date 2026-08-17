@@ -1,0 +1,263 @@
+\chapter{Open defects}
+\label{ch:defects}
+
+\section{Burst mode replays about half of every run}
+\label{sec:replay}
+
+\subsection{The evidence}
+
+Every burst run in both sessions shows the same signature: acquires strictly
+alternate short and long, and the short ones return a \emph{bit-identical} copy of
+the previous batch.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+\hd{Run} & \hd{Batches} & \hd{Stale} & \hd{Fraction} & \hd{Pattern} & \hd{Recorded} & \hd{True} \\
+\midrule
+2026-08-06 \co{_142358} & 211 & 106 & 50.2\% & 13 / 425\,ms & 3911\,Hz & \textbf{1946\,Hz} \\
+2026-08-06 \co{_142443} & 66  & 33  & 50.0\% & 13 / 424\,ms & 4182\,Hz & \textbf{2091\,Hz} \\
+2026-08-06 \co{_145051} & 44  & 23  & 52.3\% & 13 / 425\,ms & 4421\,Hz & \textbf{2110\,Hz} \\
+2026-08-06 \co{_145144} & 14  & 7   & 50.0\% & 13 / 425\,ms & 4455\,Hz & \textbf{2227\,Hz} \\
+\textbf{2026-08-14 \co{_150458}} & \textbf{371} & \textbf{185} & \textbf{49.9\%} & 12 / 120\,ms & 6161\,Hz & \textbf{3089\,Hz} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The separation is clean with nothing in between: the duplicate fraction is
+\textbf{0.957 in the fast batches} and 0.069 in the real ones. Within a stale batch
+the only rows that differ from the previous batch are row 0 and a block around rows
+770--818 --- and 819 is exactly the streamer's transfer stride,
+$0.1\times\co{avg_maxlen}/\co{reads_per_shot}$.
+
+Detection uses two independent tests, either of which condemns a batch:
+\begin{enumerate}
+  \item $\ge$90\% of rows identical to the previous batch;
+  \item wall-clock duration under half the FPGA work the batch claims to contain.
+\end{enumerate}
+Both are needed. On \co{_145051}, batch 24 is 82\% duplicate --- under the fraction
+threshold, because the run's one CSV-flush stall shifted the alignment --- but
+returned in \SI{12.9}{\milli\second} against \SI{425}{\milli\second} of claimed
+pulse work.
+
+\subsection{The 2026-08-06 root cause, and why it is now disproved}
+
+\begin{retractbox}[DISPROVED --- \co{config_all} / \co{reset_tproc} was not the mechanism]
+The 2026-08-06 analysis found a real bug. \co{qickdawg} called
+\co{config_all(..., load_pulses=...)}, but \co{qick} 0.2.386 names that parameter
+\co{load_envelopes}. \textbf{Every acquire raised \co{TypeError}}, was silently
+caught, and fell back to \co{config_all(soc)} with \co{reset=False} --- and
+\co{reset=False} means \co{stop_tproc(lazy=True)}, which \co{qick} documents as a
+no-op on tProc v1. \textbf{The tProc was never stopped between runs}, so the
+accumulated buffer was re-armed under a possibly-still-running program.
+
+That was fixed on 2026-08-12 (commit \co{942d9e8}) and a \co{reset_tproc=}
+argument was threaded through \co{acquire()}.
+
+\textbf{The 2026-08-14 run used the fix and the replay fraction did not change}:
+49.9\% (185/371). The rig was definitely running the new code --- $\tau$ =
+\SI{120}{\micro\second} took effect and the new streaming cell produced output.
+
+So the keyword bug was real and worth fixing, but it was \emph{not} the cause of
+the replay. \textbf{The root cause is unknown.}
+\end{retractbox}
+
+What the elimination does tell us: the mechanism is not the tProc failing to stop,
+because forcing the stop changes nothing. The remaining candidates involve the
+accumulated buffer or the shot counter rather than the program:
+
+\begin{itemize}
+  \item \co{config_bufs()} re-arming the accumulator without clearing the counter,
+        so \co{poll_data} returns the previous run's completed shots as if they were
+        new;
+  \item the board-side worker thread from the previous \co{start_readout} not being
+        joined, so its queue still holds the old transfer;
+  \item \co{start_readout}'s shot counter being read before the tProc has reset it.
+\end{itemize}
+None has been tested. A single instrumented burst run on the rig, printing the shot
+counter and the queue depth before and after each \co{start_readout}, would
+discriminate.
+
+\subsection{Mitigation, which is in place}
+
+\co{cfg.multipoint_on_stale = "drop"} makes the freshness guard re-acquire
+(\co{multipoint_stale_retries}, default 2) and, if every attempt still returns the
+same buffer, return \co{None} so the caller \textbf{skips the batch}. A replay is
+never written to the CSV as though it were data.
+
+This costs duty cycle, not correctness --- the recorded rate becomes honest:
+3089\,Hz rather than the 6161\,Hz the raw file claims. Simulated against a board
+that replays every second call, all 20 requested batches were recovered as real
+data.
+
+The guard is a byte comparison (\co{blake2b}) against the previous raw buffer, so it
+costs microseconds and catches the failure \emph{whatever} its mechanism --- which
+is why it survived the root cause being wrong.
+
+\section{Streaming's noise floor is about 6\texorpdfstring{$\times$}{x} the burst floor}
+\label{sec:streamnoise}
+
+\subsection{The evidence}
+
+Streaming and burst ran ten minutes apart at the same $\tau$, on the same hardware,
+with nothing changed on the bench (confirmed with the operator). Their amplitude
+spectral densities differ by a \textbf{flat factor of $\sim$6 across the whole
+band} (\file{tables/read_path.csv}):
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\hd{Band} & \hd{Stream} & \hd{Burst (cleaned)} & \hd{Ratio} \\
+\midrule
+10--30\,Hz   & 234.8 & 38.6 & 6.08 \\
+30--60\,Hz   & 234.1 & 44.1 & 5.31 \\
+60--100\,Hz  & 240.8 & 39.8 & 6.06 \\
+100--200\,Hz & 231.1 & 38.7 & 5.97 \\
+200--350\,Hz & 242.4 & 38.8 & 6.25 \\
+350--500\,Hz & 250.2 & 39.7 & 6.30 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\emph{(\etaunit.)}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{figures/read_path_asd.png}
+\caption{Streaming against burst amplitude spectral density. Both floors are flat;
+the ratio is constant across two and a half decades.}
+\end{figure}
+
+\subsection{What has been ruled out, with the measurement}
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{4.0cm}p{7.4cm}l@{}}
+\toprule
+\hd{Candidate} & \hd{Measurement} & \hd{Verdict} \\
+\midrule
+Mains pickup & The 60\,Hz comb (8 harmonics) accounts for \textbf{4.5\%} of the
+  stream's $\Delta f$ variance & ruled out \\
+Slow drift / the PL droop & Below $\sim$10\,Hz is \textbf{2.8\%} of the $\Delta f$
+  variance (it is 85\% of the \emph{common-mode} variance, but that cancels) & ruled out \\
+Dropped reps & \textbf{0} \co{rep_index} gaps in 125\,000 reps & ruled out \\
+Duplicated samples & \textbf{0} duplicate rows in 31\,250 samples & ruled out \\
+Packet-boundary artefacts & $\sigma$ at the first 5 rows of a packet is
+  \textbf{0.96$\times$} the mid-packet $\sigma$ (30.7 vs 31.8 ADC) & ruled out \\
+Buffer overflow as packets fill & The 500-sample first packet is \emph{no noisier}
+  than the 205-sample ones & ruled out \\
+Torn reads (partial accumulations) & The residual is symmetric, skew \textbf{+0.12},
+  kurtosis 1.24. Torn reads would skew strongly low & ruled out \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A flat, structureless, frequency-independent multiplicative excess is what a
+\textbf{read-path} difference looks like, not what a physical disturbance looks
+like. Both paths pull from the same accumulated buffer; they differ in how they
+configure and drain it.
+
+\subsection{What has been done about it}
+
+\co{stream()}'s configuration sequence now mirrors
+\co{NVAveragerProgram.acquire()} step for step. It did not before:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+& \hd{\co{acquire()}} & \hd{\co{stream()}, before 2026-08-16} \\
+\midrule
+\co{config_all}   & yes & yes \\
+\co{start_src}    & yes & yes \\
+\co{config_bufs}  & yes & yes, \emph{different order} \\
+\co{reload_mem}   & \textbf{yes} & \textbf{missing entirely} \\
+\co{start_readout}& yes & yes \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+That is the cheapest candidate to eliminate and it costs nothing if irrelevant.
+\co{stream()} also now refuses to reshape a packet whose payload size does not
+match its own rep count, which would misalign every subsequent sample and mix the
+two parked frequencies --- a failure that would produce exactly this signature and
+that was previously invisible.
+
+\begin{openbox}[OPEN --- neither change is verified to fix it]
+\textbf{Highest-priority open item.} The test is designed and takes about a minute:
+\begin{center}
+\co{python scripts/profile_twopoint_acquire.py --compare-read-paths --tau 120 --reps 500}
+\end{center}
+It alternates \co{acquire(per_rep=True)} and \co{stream()} on the \emph{same
+program object}, five times, within seconds. Identical FPGA work; only the read path
+differs. It compares raw normalised counts rather than kHz, so it does not depend on
+the ODMR calibration still being valid.
+
+\begin{itemize}
+  \item ratio $\approx 1.0$ $\Rightarrow$ the $\sim$6$\times$ was the environment
+        after all, and streaming needs no caveat;
+  \item ratio $\gg 1$ $\Rightarrow$ streaming really is noisier on identical work,
+        and it is a software defect. Follow with \co{--stream-scan} to see whether
+        it grows with buffer fill.
+\end{itemize}
+\end{openbox}
+
+\section{Post-processing: recovering runs already recorded}
+\label{sec:postproc}
+
+Independently of any hardware fix, existing burst files can be made usable. The
+pipeline is \co{process_burst()} in \file{twopoint_postprocess.py}, reachable from
+the command line as \co{scripts/clean_burst_lockin.py}. It applies, in order:
+
+\begin{enumerate}
+  \item \textbf{Stale-batch removal}, by the two tests above. Reports the fraction.
+  \item \textbf{Row-0 transient removal} from every batch.
+  \item \textbf{Re-timing on the exact cadence} from \S\ref{sec:quantum}, with each
+        surviving burst marked as its own \co{segment} so the inter-burst dead time
+        is an explicit gap. Nothing is interpolated across it and spectra are
+        computed per segment.
+  \item \textbf{Differential despiking} --- a causal Hampel filter on
+        \co{peak_shift_kHz}.
+\end{enumerate}
+
+\paragraph{Order matters.} Staleness is judged on the \emph{unfiltered} frame,
+because the batch table reconstructs each batch's start time from its first row;
+dropping row 0 first would shift every start by half a sample.
+
+\paragraph{What it cannot do.} The samples lost to the dead time between bursts are
+not there, and the genuine single-rep glitches that were double-counted are
+\emph{de}-duplicated, not explained. It recovers a correct 3.1\,kHz record from a
+6.2\,kHz one; it does not recover 6.2\,kHz.
+
+\subsection{A bug this found: never despike the channels separately}
+\label{sec:despikebug}
+
+\begin{keybox}[Per-channel despiking makes the data worse]
+The two parked channels are \textbf{0.84--0.97 correlated} through the common-mode
+PL. A Hampel filter run on them independently flagged \textbf{30 and 23} samples
+with only \textbf{4 in common} --- so most replacements are one-sided, and each
+one-sided replacement breaks the cancellation the estimator depends on and
+\emph{injects} differential noise.
+
+Measured effect:
+\begin{center}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+& \hd{raw} & \hd{per-channel} & \hd{differential} \\
+\midrule
+averaged 145321 & 54.6\,kHz & \textcolor{bad}{55.8\,kHz} & \textcolor{good}{\textbf{53.6\,kHz}} \\
+stream 145442   & 160.8\,kHz & \textcolor{bad}{175.5\,kHz} & \textcolor{good}{\textbf{155.2\,kHz}} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The default is now \co{despike="shift"}, which filters the differential.
+Per-channel remains available as \co{despike="channels"} for diagnosing raw-channel
+glitches, and prints a warning saying it will usually raise $\sigma$.
+\end{keybox}
+
+The live-loop despiker is a separate case and legitimately per-channel: there, the
+raw channels must be cleaned \emph{before} the conversion exists. It is off by
+default (\co{AVG_DESPIKE_ENABLED = False}).

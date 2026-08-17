@@ -164,6 +164,164 @@ def analyse_timing() -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- #
+# A2 -- explicit per-component budget, one row per component, per mode
+# --------------------------------------------------------------------------- #
+
+BUDGET_RUNS = [
+    ("averaged", "tau=120, 10 reps", TWOPOINT_0814 / "twopoint_lockin_live_20260814_145321.csv"),
+    ("averaged", "tau=120, 23 reps", TWOPOINT_0814 / "twopoint_lockin_live_20260814_144602.csv"),
+    ("averaged", "tau=213, 23 reps", SESSION_0806 / "Drone Sweeps/twopoint_lockin_live_20260806_144936.csv"),
+    ("burst", "tau=120, 500 reps", TWOPOINT_0814 / "twopoint_lockin_live_20260814_150458.csv"),
+    ("burst", "tau=213", SESSION_0806 / "Drone Sweeps/twopoint_lockin_live_20260806_142358.csv"),
+    ("stream", "tau=120, bin 4", TWOPOINT_0814 / "twopoint_lockin_stream_20260814_145442.csv"),
+]
+
+
+def analyse_mode_budgets() -> pd.DataFrame:
+    """Component-by-component time budget for each acquisition mode.
+
+    Every row is one component with its absolute contribution in milliseconds and
+    its share of the quantity that actually sets the rate. The components are
+    measured, not modelled:
+
+      ADC integration   exact, from the recovered readout quantum (section 3.2)
+      acquire() call    measured directly (`acq_seconds`)
+      Python outside    loop period minus `acq_seconds`, per batch
+      CSV flush stalls  loop periods above 3x the median
+      stale replays     wall-clock spent on acquires that returned a duplicate
+
+    The important structural point, and the reason this is a component *list*
+    rather than a sum: in averaged mode the ADC integration runs INSIDE the
+    acquire() call, so the two do not add. In burst mode they do add, because the
+    call cannot return until the FPGA has finished all `reps`.
+    """
+    rows = []
+    for mode, label, path in BUDGET_RUNS:
+        if not path.is_file():
+            continue
+        df = pd.read_csv(path)
+        quantum = tpp.recover_readout_quantum(df["peak_01"].to_numpy(float))
+        if quantum is None:
+            continue
+
+        if mode == "stream":
+            binf = int(df["reps_averaged"].iloc[0])
+            treg = quantum["D"] // binf
+            cadence = tpp.readout_seconds(treg, 2)
+            t = df["time_s"].to_numpy(float)
+            spacing = np.diff(t)
+            per_sample = binf * cadence * 1e3
+            reps_seen = int(df["rep_index"].iloc[-1]) + binf
+            rows += [
+                dict(mode=mode, config=label, component="ADC integration (bin x cadence)",
+                     ms=per_sample, per="output sample", note=f"{binf} reps x {cadence*1e6:.1f} us, exact"),
+                dict(mode=mode, config=label, component="host RPC chain",
+                     ms=0.0, per="output sample",
+                     note="paid once for the whole run, not per sample"),
+                dict(mode=mode, config=label, component="timestamp jitter",
+                     ms=(spacing.max() - spacing.min()) * 1e3, per="output sample",
+                     note="cadence-derived, so zero by construction"),
+                dict(mode=mode, config=label, component="TOTAL per output sample",
+                     ms=float(np.median(spacing) * 1e3), per="output sample",
+                     note=f"measured; predicted {per_sample:.3f} ms"),
+                dict(mode=mode, config=label, component="duty cycle",
+                     ms=100 * reps_seen * cadence / (t[-1] - t[0]), per="percent",
+                     note=f"{reps_seen} reps x {cadence*1e6:.0f} us over {t[-1]-t[0]:.3f} s"),
+            ]
+            continue
+
+        table = qc.batch_table(df)
+        acq = table.acq_seconds * 1e3
+        t_start = table.t_start
+        period = np.diff(t_start) * 1e3
+        n_per = table.n_samples.astype(float)
+
+        if mode == "burst":
+            n_slots, _ = tpp.infer_slots(quantum["D"], qc.fpga_cadence_seconds(df, table))
+            cadence = tpp.readout_seconds(quantum["D"], n_slots)
+            real = ~table.stale
+            fpga = float(np.median(n_per[real]) * cadence * 1e3)
+            acq_real = float(np.median(acq[real]))
+            acq_stale = float(np.median(acq[~real])) if (~table.stale).sum() else 0.0
+            span = float(df["time_s"].iloc[-1] - df["time_s"].iloc[0])
+            usable = float(real.sum() * np.median(n_per[real]))
+            host = acq_real - fpga
+            host_note = "serial here: the call waits for all reps"
+            if host < 0.01 * fpga:
+                # A small negative residual means the host share is below the
+                # resolution of bracketing the call with perf_counter() against a
+                # 120-213 ms FPGA run -- report it as "under 1% of the burst"
+                # rather than as a negative time.
+                host_note = (f"below the {0.01*fpga:.2f} ms resolution of timing a "
+                             f"{fpga:.0f} ms call; <1% of the burst")
+                host = max(host, 0.0)
+            label_reps = f"{np.median(n_per[real]):.0f} reps x {cadence*1e6:.1f} us, exact"
+            rows += [
+                dict(mode=mode, config=f"{label}, {np.median(n_per[real]):.0f} reps",
+                     component="ADC integration (reps x cadence)",
+                     ms=fpga, per="burst", note=label_reps),
+                dict(mode=mode, config=f"{label}, {np.median(n_per[real]):.0f} reps",
+                     component="host RPC chain", ms=host, per="burst", note=host_note),
+                dict(mode=mode, config=f"{label}, {np.median(n_per[real]):.0f} reps",
+                     component="acquire() total, real burst",
+                     ms=acq_real, per="burst", note="measured"),
+                dict(mode=mode, config=f"{label}, {np.median(n_per[real]):.0f} reps",
+                     component="stale replay acquire", ms=acq_stale, per="burst",
+                     note=f"x{int(table.stale.sum())} batches = {acq_stale*table.stale.sum()/1e3:.2f} s wasted"),
+                dict(mode=mode, config=f"{label}, {np.median(n_per[real]):.0f} reps",
+                     component="TOTAL per usable sample",
+                     ms=span * 1e3 / usable if usable else np.nan, per="sample",
+                     note=f"-> {usable/span:.0f} Hz net, {1/cadence:.0f} Hz in-burst"),
+                dict(mode=mode, config=f"{label}, {np.median(n_per[real]):.0f} reps",
+                     component="duty cycle",
+                     ms=100 * real.sum() * np.median(n_per[real]) * cadence / span, per="percent",
+                     note="fraction of wall clock spent integrating"),
+            ]
+            continue
+
+        # averaged
+        fpga = tpp.readout_seconds(quantum["D"]) * 1e3
+        acq_med = float(np.median(acq))
+        acq_p05 = float(np.percentile(acq, 5))
+        per_med = float(np.median(period))
+        stalls = period[period > 3 * per_med]
+        rows += [
+            dict(mode=mode, config=label, component="ADC integration (reps x cadence)",
+                 ms=fpga, per="sample", note="exact; runs INSIDE the call, does not add"),
+            dict(mode=mode, config=label, component="acquire() call, fastest",
+                 ms=acq_p05, per="sample", note="upper bound on the host-chain floor"),
+            dict(mode=mode, config=label, component="acquire() call, median",
+                 ms=acq_med, per="sample", note="measured; this is what sets the rate"),
+            dict(mode=mode, config=label, component="acquire() jitter (p95-p05)",
+                 ms=float(np.percentile(acq, 95) - acq_p05), per="sample",
+                 note="host/network scheduling"),
+            dict(mode=mode, config=label, component="Python outside acquire()",
+                 ms=per_med - acq_med, per="sample", note="row build, conversion, hist"),
+            dict(mode=mode, config=label, component="CSV flush stalls",
+                 ms=float(stalls.max()) if len(stalls) else 0.0, per="worst event",
+                 note=f"{len(stalls)} events above 3x the median period"),
+            dict(mode=mode, config=label, component="TOTAL per sample",
+                 ms=per_med, per="sample", note=f"-> {1e3/per_med:.1f} Hz"),
+            dict(mode=mode, config=label, component="duty cycle",
+                 ms=100 * fpga / per_med, per="percent",
+                 note="fraction of wall clock spent integrating"),
+        ]
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    print("A2. PER-MODE COMPONENT BUDGET")
+    print("-" * 78)
+    for (mode, config), grp in out.groupby(["mode", "config"], sort=False):
+        print(f"\n  {mode.upper()}  {config}")
+        for _, r in grp.iterrows():
+            unit = "%" if r["per"] == "percent" else "ms"
+            print(f"    {r['component']:36s} {r['ms']:9.3f} {unit:2s} / {r['per']:14s} {r['note']}")
+    print()
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # B -- what each mode delivered
 # --------------------------------------------------------------------------- #
 
@@ -473,12 +631,14 @@ def main() -> int:
     print()
 
     timing = analyse_timing()
+    budgets = analyse_mode_budgets()
     modes = analyse_modes()
     readpath = analyse_read_path()
     perrep = analyse_per_rep()
     spectra = analyse_spectra()
 
-    for name, frame in (("timing", timing), ("modes", modes), ("read_path", readpath),
+    for name, frame in (("timing", timing), ("mode_budgets", budgets),
+                        ("modes", modes), ("read_path", readpath),
                         ("per_rep_noise", perrep), ("spectra", spectra)):
         if not frame.empty:
             frame.to_csv(TABLES / f"{name}.csv", index=False)

@@ -1,0 +1,240 @@
+\chapter{What all three methods share}
+\label{ch:common}
+
+The three acquisition methods run the \emph{same} FPGA program and read the
+\emph{same} accumulated buffer. They differ only in how many repetitions the host
+takes per call and how it drains the buffer. Everything in this chapter is
+therefore common to all three, and the per-method chapters that follow only have
+to describe the differences.
+
+\section{The FPGA program: one rep, step by step}
+\label{sec:asm}
+
+\co{MultipointLockinODMR.body()}
+(\file{notebook_modules/multipoint_lockin_program.py}, lines 191--236) emits the
+following assembly \emph{per parked frequency}, i.e. per \emph{emission slot}:
+
+\begin{center}
+\small
+\begin{tabular}{@{}c>{\raggedright\arraybackslash}p{4.3cm}>{\raggedright\arraybackslash}p{6.0cm}>{\raggedright\arraybackslash}p{2.5cm}@{}}
+\toprule
+\hd{\#} & \hd{ASM step} & \hd{What it does} & \hd{Time cost} \\
+\midrule
+1 & \co{mw_frequency_register.set_to(f)} & Retunes the MW generator at runtime.
+    This is the trick that lets 2 (or 16) non-uniform frequencies live in one
+    program instead of one upload each. & a few tProc cycles ($\sim$ns) \\[2pt]
+2 & \co{pulse(ch=mw_channel, t=0)} & Constant-amplitude MW pulse, length set
+    equal to the readout window. & \textbf{0} --- runs concurrently with step 3 \\[2pt]
+3 & \co{trigger_no_off(adcs, pins=[laser_gate],} \co{width=readout_integration_treg, t=0)}
+  & Opens the laser gate \emph{and} arms the ADC accumulator for
+    \co{readout_integration_treg} clock cycles. \textbf{This step is the rep.} &
+    \boldmath$\tau$ (\SI{120}{\micro\second} at the current default) \\[2pt]
+4 & \co{trigger(pins=[laser_gate],} \co{width=relax_delay_treg, t=...treg)}
+  & Closing trigger: drives the laser gate low at the end of this slot. &
+    \SI{3.3}{\micro\second} nominal, absorbed in practice \\[2pt]
+5 & \co{wait_all()} & Waits for the ADC to finish writing. & $\sim$0 \\[2pt]
+6 & \co{sync_all(relax_delay_treg)} & Advances the tProc time cursor. &
+    \SI{3.3}{\micro\second} nominal, absorbed in practice \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{How many slots there are}
+
+\begin{center}
+\small
+\begin{tabular}{@{}llcc@{}}
+\toprule
+\hd{\co{multipoint_pair_order}} & \hd{\co{multipoint_skip_reference}} & \hd{Slots/rep} & \hd{Readouts/rep} \\
+\midrule
+\co{"forward"} & \co{True}  \emph{(current default)} & 2 & \textbf{2} \\
+\co{"forward"} & \co{False} & 2 & 4 \\
+\co{"abba"}    & \co{True}  & 4 & \textbf{4} \\
+\co{"abba"}    & \co{False} & 4 & 8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\co{multipoint_skip_reference = True} drops the per-slot ``MW-off'' reference
+readout. It is on because the MW cannot actually be gated off on this setup, so
+the reference was a contaminated copy of the signal rather than a clean
+normaliser --- it halved the FPGA time and removed a systematic. With it on, $z$
+is normalised against a stored constant (\co{ref_norm_counts} from the
+calibration JSON) instead of a per-shot reference.
+
+\subsection{The one timing formula everything else derives from}
+
+\begin{equation}
+\boxed{\;t_\text{rep} \;=\; n_\text{slots}\times n_\text{readouts per slot}\times \tau\;}
+\label{eq:trep}
+\end{equation}
+
+At the current default (2 slots, 1 readout each, $\tau=\SI{120}{\micro\second}$):
+\[
+t_\text{rep} = 2\times 1\times \SI{120}{\micro\second} = \SI{240}{\micro\second}
+\qquad\Longrightarrow\qquad \SI{4167}{\hertz}\ \text{per rep}.
+\]
+
+\begin{keybox}[The relax windows do not appear in Eq.~\ref{eq:trep}, and that is measured]
+An earlier model added the two relax windows per slot, giving
+$n_\text{slots}\times(\tau + 2\times\SI{3.3}{\micro\second})$. The measurement
+does not support it. Across the burst runs the cadence is
+\SI{426.0}{\micro\second} at $\tau=\SI{213}{\micro\second}$ --- exactly
+$2\times 213$ --- and \SI{240.0}{\micro\second} at
+$\tau=\SI{120}{\micro\second}$ --- exactly $2\times 120$. The relax and sync
+windows overlap the readout rather than following it. \co{time_per_rep()} was
+corrected accordingly; \co{include_relax=True} restores the old sum as a
+conservative upper bound.
+\end{keybox}
+
+\section{What the accumulated buffer holds}
+\label{sec:buffer}
+
+The ADC does not hand back samples; it hands back a \emph{sum}. For each readout
+trigger, the firmware accumulates \co{readout_integration_treg} raw ADC samples
+into one 64-bit integer entry, and writes one such entry per readout per rep. So
+after a run of \co{reps} repetitions with $R$ readouts per rep, the buffer holds
+$\text{reps}\times R$ integers, laid out as
+\co{(reps, nsweep, R)} --- with \co{nsweep = 1} here.
+
+\co{analyze_results()} then does two divisions:
+
+\begin{equation}
+\text{stored value} \;=\; \frac{\text{integer accumulator sum}}
+                               {\underbrace{\texttt{readout\_integration\_treg}}_{\text{always}}
+                                \times
+                                \underbrace{\texttt{reps}}_{\text{averaged mode only}}}
+\label{eq:divisions}
+\end{equation}
+
+Two consequences, both used heavily later:
+
+\begin{enumerate}
+  \item \textbf{The stored counts are $\tau$-independent in the mean} (they are a
+  mean ADC level, not a total), which is why the counts do not grow when $\tau$
+  is raised. Their \emph{variance} does fall as $1/\tau$, which is the sensitivity
+  benefit of a longer window.
+  \item \textbf{The exact FPGA readout time is recoverable from the recorded
+  numbers.} This is the measurement that settled the timing question; it gets its
+  own section.
+\end{enumerate}
+
+\section{Recovering the exact readout time from the data}
+\label{sec:quantum}
+
+Because the numerator of Eq.~\ref{eq:divisions} is an integer, every stored count
+is an integer multiple of
+\[
+\frac{1}{D},\qquad D \equiv \texttt{treg}\times\texttt{reps}.
+\]
+Searching for the smallest divisor $D$ that makes \emph{all} of a run's counts
+integral therefore recovers $D$ exactly, with no reliance on what the notebook
+claims it configured. The readout time follows:
+
+\begin{equation}
+\boxed{\;t_\text{ADC per call} \;=\; n_\text{slots}\times \frac{D}{f_\text{clk}},
+\qquad f_\text{clk} = \SI{307.2}{\mega\hertz}\;}
+\label{eq:recover}
+\end{equation}
+
+The clock is pinned independently by two runs:
+$\SI{213}{\micro\second}\leftrightarrow\texttt{treg}=65434$ and
+$\SI{120}{\micro\second}\leftrightarrow\texttt{treg}=36864$, both giving
+\SI{307.2}{\mega\hertz}.
+
+\paragraph{Only the product is identifiable.} $D=36864$ is
+$(\texttt{treg}=36864)\times(\texttt{reps}=1)$ and
+$(\texttt{treg}=768)\times(\texttt{reps}=48)$ equally well. That is sufficient,
+because Eq.~\ref{eq:recover} depends only on $D$. In \emph{burst} mode there is
+no rep averaging, so $D$ \emph{is} \co{treg} and the readout window follows
+directly --- which is how the 2026-08-14 burst run was confirmed to be at
+$\tau=\SI{120.0}{\micro\second}$, exactly as configured.
+
+Implemented as \co{twopoint_postprocess.recover_readout_quantum()} and
+\co{readout_seconds()}.
+
+\begin{keybox}[Why this matters practically]
+It replaced a 12\% error. The burst cadence had been estimated as
+\co{acq_seconds / n_samples} over the real batches, which reads
+\SI{269}{\micro\second} against a true \SI{240}{\micro\second} because it
+includes the host share of each acquire. That 12\% stretch went straight into the
+time axis, the quoted rate, and the frequency scale of every spectrum.
+\end{keybox}
+
+\section{The host RPC chain}
+\label{sec:rpc}
+
+\co{NVAveragerProgram.acquire()}
+(\file{qickdawg/nvpulsing/nvaverageprogram.py}, lines 163--304) issues this
+sequence of Pyro remote calls to the board on \textbf{every} call:
+
+\begin{center}
+\small
+\begin{tabular}{@{}c>{\raggedright\arraybackslash}p{5.4cm}>{\raggedright\arraybackslash}p{7.2cm}@{}}
+\toprule
+\hd{Stage} & \hd{Call} & \hd{Notes} \\
+\midrule
+1 & \co{config_all(soc, load_envelopes, reset, load_mem)} &
+   Uploads the program. \co{load_mem=True}, so the binary and data memory are
+   re-sent on every call. Until 2026-08-12 this raised \co{TypeError} on every
+   call (wrong keyword) and fell through to defaults. \\
+1a & $\rightarrow$ \co{soc.start_src("internal")} & inside \co{config_all} \\
+1b & $\rightarrow$ \co{soc.stop_tproc(lazy=not reset)} &
+   \textbf{documented no-op on tProc v1} unless \co{reset=True} \\
+1c & $\rightarrow$ \co{load_envelopes}, \co{load_bin_program}, \co{load_mem} &
+   re-uploaded each call \\
+2 & \co{soc.start_src(start_src)} & again, from \co{acquire} \\
+3 & \co{config_bufs(soc, enable_avg=True, enable_buf=False)} & arms the accumulator \\
+4 & \co{soc.reload_mem()} & no-op unless tProc v2 \\
+5 & \co{soc.start_readout(total_count, ...)} & starts the board-side worker \emph{and} the tProc \\
+6 & \co{soc.poll_data()} $\times N$ & \textbf{blocks here while the FPGA runs} \\
+7 & Pyro deserialise $\rightarrow$ \co{analyze_results()} reshape & host-side \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{keybox}[The critical structural fact: stage 6 is where the FPGA time goes]
+The host does not wait for the FPGA \emph{after} finishing its own work --- it
+waits \emph{inside} stage 6, which is part of the chain. So the FPGA time is
+\textbf{concurrent with} the host chain, not additive to it, up to the point where
+the FPGA run outlasts the rest of the chain.
+
+That single fact is the whole content of Chapter~\ref{ch:timing}, and it is what
+the 2026-08-06 analysis got wrong.
+\end{keybox}
+
+\begin{openbox}[OPEN --- the per-stage split has never been measured]
+The stage list above is read off the source. The \emph{time} each stage takes can
+only be measured on the rig, by wrapping the soc proxy so every remote call is
+timed. \file{scripts/profile_twopoint_acquire.py} does exactly that and has never
+been run, because the RFSoC is not reachable from the analysis machine. Until it
+is, the chain is known only in total (10--11.4\,ms) and not stage by stage.
+
+This is the single largest gap in this document. Run:
+\begin{center}\co{python scripts/profile_twopoint_acquire.py --ip 192.168.0.103}\end{center}
+\end{openbox}
+
+\section{Python outside the call}
+
+Measured directly as (loop period $-$ \co{acq_seconds}), per batch:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\hd{Run} & \hd{Python outside \co{acquire()}} & \hd{Share of period} \\
+\midrule
+2026-08-14 $\tau$=120, 10 reps & \SI{0.067}{\milli\second} & 0.58\% \\
+2026-08-14 $\tau$=120, 23 reps & \SI{0.056}{\milli\second} & 0.49\% \\
+2026-08-06 $\tau$=213, 23 reps & \SI{0.058}{\milli\second} & 0.51\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Row-dict construction, the conversion arithmetic and the history append together
+cost well under a tenth of a millisecond. \textbf{The Python side is not a
+bottleneck in any mode} and the earlier vectorisation of the per-sample
+conversion did its job. It is listed here so that it can be ruled out rather than
+suspected.
+
+The exception is the CSV write, which is not per-sample and is covered per mode.
