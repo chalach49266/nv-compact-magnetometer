@@ -138,6 +138,54 @@ def asd_nt(shift_khz, fs: float, nseg: int = 8, detrend: str = "linear",
     return f, np.sqrt(psd)
 
 
+def fft_amplitude_nt(shift_khz, fs: float, detrend: str = "linear",
+                     window: str = "hann",
+                     gamma_mhz_per_ut: float = GAMMA_NV_MHZ_PER_UT
+                     ) -> tuple[np.ndarray, np.ndarray]:
+    """Plain single-sided FFT amplitude spectrum, in nT.
+
+    This is the raw transform of the whole record -- no segmenting, no Welch
+    averaging -- so the y axis is an *amplitude in nT*, not a density in
+    nT/sqrt(Hz), and it answers a different question from `asd_nt`:
+
+        asd_nt            how much broadband noise per root hertz. Averaged over
+                          `nseg` segments, so the floor is stable but a coherent
+                          line is smeared across the segment bandwidth and its
+                          height depends on the window length.
+        fft_amplitude_nt  how many nT a periodic component actually is. One bin
+                          per fs/N, every bin kept, so a 60 Hz line reads its
+                          true amplitude -- at the cost of ~100% scatter on the
+                          broadband floor, which is what a single periodogram
+                          always has.
+
+    Use the ASD to quote a sensitivity, this to identify and size a line.
+
+    Scaling is amplitude-correct for a sinusoid: the one-sided spectrum is
+    2/sum(w) * |rfft(w*x)|, so a pure tone of amplitude A reads A regardless of
+    record length or window. DC and Nyquist are not doubled.
+    """
+    x = np.asarray(khz_to_nt(shift_khz, gamma_mhz_per_ut), dtype=float)
+    x = x[np.isfinite(x)]
+    n = x.size
+    if n < 4:
+        return np.array([]), np.array([])
+    x = _detrend(x, detrend)
+
+    if window == "hann":
+        w = np.hanning(n)
+    elif window in (None, "none", "boxcar"):
+        w = np.ones(n)
+    else:
+        raise ValueError(f"unknown window {window!r}")
+
+    spec = np.fft.rfft(x * w)
+    amp = 2.0 * np.abs(spec) / np.sum(w)
+    amp[0] /= 2.0
+    if n % 2 == 0:
+        amp[-1] /= 2.0
+    return np.fft.rfftfreq(n, d=1.0 / fs), amp
+
+
 def segmented_asd_nt(shift_khz, segment, fs: float, detrend: bool = True,
                      gamma_mhz_per_ut: float = GAMMA_NV_MHZ_PER_UT
                      ) -> tuple[np.ndarray, np.ndarray]:
@@ -292,6 +340,11 @@ class SpectrumSummary:
     aliases: list[AliasWarning] = field(default_factory=list)
     f: Optional[np.ndarray] = None
     asd: Optional[np.ndarray] = None
+    # Plain single-sided FFT of the same trace, amplitude in nT. Kept alongside
+    # the Welch ASD because the two answer different questions -- see
+    # `fft_amplitude_nt`.
+    fft_f: Optional[np.ndarray] = None
+    fft_amp_nt: Optional[np.ndarray] = None
 
     def to_dict(self) -> dict:
         strongest = (self.lines.sort_values("excess_over_floor").iloc[-1].to_dict()
@@ -352,6 +405,16 @@ def summarise(shift_khz, fs: float, segment=None, nseg: int = 8,
                         gamma_mhz_per_ut=gamma_mhz_per_ut)
 
     band = tuple(floor_band) if floor_band else default_floor_band(fs)
+
+    # The plain transform of the whole record, alongside the Welch estimate. Burst
+    # data is deliberately left out: its record is not contiguous, so a transform
+    # across the whole thing would put a frequency scale on the inter-burst gaps.
+    if segment is None:
+        fft_f, fft_amp = fft_amplitude_nt(x, fs, detrend=detrend,
+                                          gamma_mhz_per_ut=gamma_mhz_per_ut)
+    else:
+        fft_f, fft_amp = None, None
+
     return SpectrumSummary(
         fs_hz=float(fs),
         sigma_khz=sigma,
@@ -362,4 +425,6 @@ def summarise(shift_khz, fs: float, segment=None, nseg: int = 8,
         aliases=alias_report(fs),
         f=f,
         asd=asd,
+        fft_f=fft_f,
+        fft_amp_nt=fft_amp,
     )

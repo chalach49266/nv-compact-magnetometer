@@ -1,0 +1,23 @@
+{
+  "odmr_csv": "C:\\Users\\Thoma\\Downloads\\nv-compact-magnetometer\\data\\odmr_sweeps\\odmr_sweep_20260817_120947.csv",
+  "orient": 1.0,
+  "f0_mhz": 2797.15626244116,
+  "gamma_mhz": 3.6685728457144005,
+  "fwhm_mhz": 7.337145691428801,
+  "contrast": 0.3504415098274801,
+  "baseline_fit": 0.9968014389988246,
+  "rms_resid": 0.013568008689997647,
+  "fit_window_mhz": 41.999983978270386,
+  "f_minus_mhz": 2793.7154073850998,
+  "f_plus_mhz": 2800.7154047148115,
+  "baseline_minus": 0.7986427400897532,
+  "baseline_plus": 0.7986427400897388,
+  "slope_minus_per_mhz": -0.06820085509342386,
+  "slope_plus_per_mhz": 0.06559118547370665,
+  "placement_mode": "symmetric_max_slope",
+  "balance_offset_mhz": 0.05914360879569358,
+  "snr": 158.9077766480445,
+  "total_score": 0.9472627259950481,
+  "gamma_nv_mhz_per_uT": 0.028024,
+  "ref_norm_counts": 1175.9434995568051
+}

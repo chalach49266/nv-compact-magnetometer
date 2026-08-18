@@ -154,6 +154,81 @@ Replaced by \co{twopoint_runner.IncrementalCsvWriter}, which appends only the ne
 rows (header once). On a 40\,000-row run this is 10.2$\times$ cheaper and the
 stall is flat with run length instead of growing.
 
+\section{Why you no longer enter a reps-per-batch}
+\label{sec:noreps}
+
+Every version of this notebook before 2026-08-16 asked you for
+\co{REPS_PER_BATCH}, and every value anyone entered was wrong, because the right
+value is not a preference --- it is a measurement of the host, and the host is
+the only thing that sets it.
+
+\subsection{The argument}
+
+An \co{acquire()} call costs \SI{8.5}{}--\SI{11.4}{\milli\second} of host
+round-trip \emph{whatever the program does}, and the FPGA work runs underneath
+that rather than adding to it (Ch.~\ref{ch:timing} is the evidence). So the
+period is
+
+\begin{equation}
+T = \max\!\left(\underbrace{T_\text{host}}_{\text{fixed}},\ \underbrace{\text{reps}\times t_\text{rep}}_{\text{yours}}\right),
+\label{eq:period}
+\end{equation}
+
+\noindent which is \emph{flat} in reps until the second term overtakes the first.
+Every rep below the crossing is free: the call takes the same wall-clock time
+either way, so an under-filled batch is not a faster measurement, it is the same
+measurement with photons thrown away. Setting reps by hand can only do one of two
+things --- leave sensitivity on the table, or cross the floor and cost rate.
+
+\co{AVG_REPS_PER_BATCH = None} therefore replaces the question with the
+arithmetic:
+
+\begin{equation}
+\co{reps_that_fit()} = \left\lfloor \frac{T_\text{floor}}{t_\text{rep}} \right\rfloor .
+\label{eq:repsfit}
+\end{equation}
+
+Two details in there are deliberate. It uses the \emph{floor} --- the fastest call
+observed, 5th percentile --- rather than the typical call, so that filling the
+budget does not make the quick calls FPGA-bound and drag the rate down. And
+$T_\text{floor}$ comes from \co{measure_host_floor()} run at the top of the cell
+(\co{AVG_CALIBRATE_FLOOR = True}, $\sim$\SI{0.3}{\second}) rather than from the
+stored \co{HOST_FLOOR_S = \SI{10.1}{\milli\second}}, because the floor is
+rig- and session-dependent: it has moved by \SI{1.6}{\milli\second} across the
+four sessions on record.
+
+\subsection{Worked, on the 2026-08-17 run}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lr>{\raggedright\arraybackslash}p{7.2cm}@{}}
+\toprule
+\hd{Quantity} & \hd{Value} & \hd{Where it came from} \\
+\midrule
+measured floor $T_\text{floor}$ & \SI{8.52}{\milli\second} & \co{measure_host_floor()}, 5th percentile of 20 calls \\
+median call & \SI{8.71}{\milli\second} & same measurement \\
+$t_\text{rep}$ & \SI{240}{\micro\second} & Eq.~\ref{eq:trep}, 2 slots $\times$ \SI{120}{\micro\second} \\
+\co{reps_that_fit()} & \textbf{35} & $\lfloor 8.52/0.240 \rfloor$ \\
+FPGA work at 35 reps & \SI{8.40}{\milli\second} & $35\times\SI{240}{\micro\second}$ --- 99\% of the floor used \\
+achieved rate & \SI{104.5}{\hertz} & 1067 samples in \SI{10.2}{\second} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The cell then reports how much was left over, and on that run it reported that 36
+reps would still have fitted --- a 1.4\% improvement it declined to take
+automatically, because the floor is measured with jitter and rounding up would
+sometimes cross it.
+
+\subsection{You can still set it by hand}
+
+\co{AVG_REPS_PER_BATCH = <int>} overrides Eq.~\ref{eq:repsfit} and the cell prints
+\co{(set by hand)} instead of \co{(auto: filled the floor)}. Reasons to do it:
+reproducing an old run exactly, or deliberately going \emph{past} the floor to
+trade rate for averaging --- at $\tau=\SI{120}{\micro\second}$, 100 reps gives
+\SI{24}{\milli\second} of FPGA work and therefore \SI{42}{\hertz}, with $\sqrt{100/35}
+= 1.7\times$ the averaging. Below 35 there is no reason at all.
+
 \section{What to set}
 
 \begin{center}
@@ -163,8 +238,8 @@ stall is flat with run length instead of growing.
 \hd{Parameter} & \hd{Recommended} & \hd{Why} \\
 \midrule
 \co{AVG_REPS_PER_BATCH} & \co{None} & Fills the measured call floor automatically
-  via \co{reps_that_fit()}. At $\tau$=120 that is \textbf{42 reps}, against the 10
-  actually used --- see \S\ref{sec:freeavg}. \\
+  via \co{reps_that_fit()} --- 35 reps at $\tau$=120 on 2026-08-17, against the 10
+  used on 08-14. See \S\ref{sec:noreps} and \S\ref{sec:freeavg}. \\
 \co{AVG_CALIBRATE_FLOOR} & \co{True} & Measures the floor on this rig at startup;
   it already differs by 1.2\,ms between the two sessions. Costs $\sim$0.3\,s. \\
 \co{readout_integration_tus} & 120 & Inside the flat sensitivity band

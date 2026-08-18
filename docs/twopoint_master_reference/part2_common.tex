@@ -7,37 +7,137 @@ takes per call and how it drains the buffer. Everything in this chapter is
 therefore common to all three, and the per-method chapters that follow only have
 to describe the differences.
 
+\section{The clock everything is counted in}
+\label{sec:clock}
+
+Every duration in the program is stored as an integer number of cycles --- the
+\co{_treg} suffix on every \co{NVConfiguration} field. The conversion is done by
+\co{soccfg.us2cycles()} and the clock is
+
+\begin{equation}
+f_\text{tProc} = \SI{307.2}{\mega\hertz}
+\qquad\Longrightarrow\qquad
+1\ \text{treg} = \frac{1}{\SI{307.2}{\mega\hertz}} = \SI{3.2552}{\nano\second}.
+\label{eq:clock}
+\end{equation}
+
+That number is not taken from the firmware printout; it is recovered from the
+data, by the argument in \S\ref{sec:quantum}. The recovered divisor for the
+\SI{213}{\micro\second} runs is $D=65434$, and
+$65434/\num{307.2e6} = \SI{213.001}{\micro\second}$ --- and \co{us2cycles(213)}
+rounds $213\times307.2 = 65433.6$ to exactly \num{65434}. The two agree to the
+last cycle, which is what makes it safe to quote the rest of this chapter in
+nanoseconds.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+\hd{Field} & \hd{Value} & \hd{treg} & \hd{Exact duration} \\
+\midrule
+\co{readout_integration_tus} = 120 (current) & \SI{120}{\micro\second} & \num{36864} & \SI{120.0000}{\micro\second} \\
+\co{readout_integration_tus} = 213 (08-06)   & \SI{213}{\micro\second} & \num{65434} & \SI{213.0013}{\micro\second} \\
+\co{relax_delay_treg} (set in the run cells) & --- & \num{1000} & \SI{3.2552}{\micro\second} \\
+\co{relax_delay_tns} (\co{default_config})   & \SI{500000}{\nano\second} & \num{153600} & \SI{500.0000}{\micro\second} \\
+\co{synci(100)} in \co{initialize()}         & --- & \num{100} & \SI{325.52}{\nano\second} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\co{default_config.relax_delay_tns = 500000} is \emph{overridden} by every
+acquisition cell, each of which sets \co{relax_delay_treg = 1000}. The
+\SI{500}{\micro\second} value never reaches the FPGA in any of the three methods;
+it would double the rep time if it did.
+
 \section{The FPGA program: one rep, step by step}
 \label{sec:asm}
 
 \co{MultipointLockinODMR.body()}
-(\file{notebook_modules/multipoint_lockin_program.py}, lines 191--236) emits the
-following assembly \emph{per parked frequency}, i.e. per \emph{emission slot}:
+(\file{notebook_modules/multipoint_lockin_program.py}) emits the following
+assembly \emph{per parked frequency}, i.e.\ per \emph{emission slot}. The last
+column is what each step contributes to the tProc time cursor --- which is not
+the same as how long the step lasts, and the difference is the whole content of
+this table.
 
 \begin{center}
 \small
-\begin{tabular}{@{}c>{\raggedright\arraybackslash}p{4.3cm}>{\raggedright\arraybackslash}p{6.0cm}>{\raggedright\arraybackslash}p{2.5cm}@{}}
+\begin{tabular}{@{}c>{\raggedright\arraybackslash}p{4.6cm}>{\raggedright\arraybackslash}p{5.6cm}>{\raggedright\arraybackslash}p{2.9cm}@{}}
 \toprule
-\hd{\#} & \hd{ASM step} & \hd{What it does} & \hd{Time cost} \\
+\hd{\#} & \hd{ASM step} & \hd{What it does} & \hd{Advances the cursor by} \\
 \midrule
 1 & \co{mw_frequency_register.set_to(f)} & Retunes the MW generator at runtime.
     This is the trick that lets 2 (or 16) non-uniform frequencies live in one
-    program instead of one upload each. & a few tProc cycles ($\sim$ns) \\[2pt]
-2 & \co{pulse(ch=mw_channel, t=0)} & Constant-amplitude MW pulse, length set
-    equal to the readout window. & \textbf{0} --- runs concurrently with step 3 \\[2pt]
-3 & \co{trigger_no_off(adcs, pins=[laser_gate],} \co{width=readout_integration_treg, t=0)}
-  & Opens the laser gate \emph{and} arms the ADC accumulator for
-    \co{readout_integration_treg} clock cycles. \textbf{This step is the rep.} &
-    \boldmath$\tau$ (\SI{120}{\micro\second} at the current default) \\[2pt]
-4 & \co{trigger(pins=[laser_gate],} \co{width=relax_delay_treg, t=...treg)}
-  & Closing trigger: drives the laser gate low at the end of this slot. &
-    \SI{3.3}{\micro\second} nominal, absorbed in practice \\[2pt]
-5 & \co{wait_all()} & Waits for the ADC to finish writing. & $\sim$0 \\[2pt]
-6 & \co{sync_all(relax_delay_treg)} & Advances the tProc time cursor. &
-    \SI{3.3}{\micro\second} nominal, absorbed in practice \\
+    program instead of one upload each. & \textbf{0}. Register writes are tProc
+    instructions, not scheduled events. \\[2pt]
+2 & \co{pulse(ch=mw_channel, t=0)} & Constant-amplitude MW pulse. Its length is
+    \co{readout_integration_treg} --- the MW is on for exactly the readout
+    window, not longer. & Sets the \emph{generator} timestamp to
+    $0+\tau = \SI{120.0000}{\micro\second}$ \\[2pt]
+3 & \co{trigger_no_off(adcs, pins=[laser_gate],} \co{width=readout_integration_treg,}
+    \co{adc_trig_offset=0, t=0)}
+  & Opens the laser gate \emph{and} arms the ADC accumulator, both at $t=0$.
+    \textbf{This step is the rep.} & Sets the \emph{readout} timestamp to
+    $0+\tau = \SI{120.0000}{\micro\second}$ \\[2pt]
+4 & \co{trigger(pins=[laser_gate],} \co{width=relax_delay_treg,}
+    \co{t=readout_integration_treg)}
+  & Closing trigger: drives the laser gate low at the end of the slot. Pins only
+    --- no \co{adcs}. & \textbf{0}. See the box below. \\[2pt]
+5 & \co{wait_all()} & Blocks the tProc until every timestamp is reached. &
+    \textbf{0} beyond what 2 and 3 already set \\[2pt]
+6 & \co{sync_all(relax_delay_treg)} & New cursor $=$ max timestamp $+$
+    \num{1000}\,treg. & \SI{3.2552}{\micro\second} \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+\begin{keybox}[Why step 4's \SI{3.2552}{\micro\second} costs nothing, from the source]
+\co{trigger()} only writes a timestamp inside \co{if any([adcs, ddr4, mr]):}
+(\file{qickdawg/nvpulsing/nvaverageprogram.py}). Step 4 passes \co{pins} and
+nothing else, so that branch is skipped entirely: the call emits two \co{seti}
+output-set instructions and touches no channel's timestamp. Its \co{width} is a
+property of the laser gate waveform, not of the schedule.
+
+\co{trigger_no_off()} is the same function with the closing \co{seti} commented
+out --- which is what the name means. It \emph{does} set the readout timestamp,
+to \co{t_start + ro_length} converted into tProc cycles, and that is step 3's
+entry above.
+\end{keybox}
+
+% \texorpdfstring because a bare \SI{...}{\percent} expands to a literal `%' in the
+% PDF bookmark, which comments out the rest of the .out line and breaks the build.
+\subsection{\texorpdfstring{The per-slot budget, and the \SI{1.6}{\percent} that is left over}{The per-slot budget, and the 1.6 percent that is left over}}
+
+Summing the last column: one slot advances the cursor by
+$\tau + \SI{3.2552}{\micro\second}$, so the programmed rep time is
+
+\begin{equation}
+t_\text{rep}^\text{programmed} \;=\; n_\text{slots}\times\left(n_\text{readouts}\,\tau + \SI{3.2552}{\micro\second}\right).
+\label{eq:trepprog}
+\end{equation}
+
+At the two operating points that have been measured:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+& \hd{$n_\text{slots}\tau$} & \hd{Eq.~\ref{eq:trepprog}} & \hd{measured cadence} & \hd{Eq.~\ref{eq:trepprog}\,$-$\,measured} \\
+\midrule
+$\tau=\SI{213}{\micro\second}$, 2 slots & \SI{426.0}{\micro\second} & \SI{432.5}{\micro\second} & \SI{423.8}{}--\SI{425.4}{\micro\second} & $+7$ to \SI{+9}{\micro\second} (1.6--2.0\%) \\
+$\tau=\SI{120}{\micro\second}$, 2 slots & \SI{240.0}{\micro\second} & \SI{246.5}{\micro\second} & \SI{240.0}{\micro\second}$^\dagger$ & \SI{+6.5}{\micro\second} (2.7\%) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent{\footnotesize $^\dagger$recovered exactly from the value quantisation
+(\S\ref{sec:quantum}); the \SI{213}{\micro\second} figures are wall-clock cadences
+across four 2026-08-06 burst runs.}
+
+The measurement sits \emph{below} even $n_\text{slots}\tau$ at
+$\tau=\SI{213}{\micro\second}$, so the two \co{sync_all} terms are not merely
+small --- they are not visible at all. The model used everywhere in this document
+therefore drops them; \S\ref{sec:trep} states it and \co{time_per_rep()}
+implements it.
 
 \subsection{How many slots there are}
 
@@ -63,28 +163,47 @@ is normalised against a stored constant (\co{ref_norm_counts} from the
 calibration JSON) instead of a per-shot reference.
 
 \subsection{The one timing formula everything else derives from}
+\label{sec:trep}
 
 \begin{equation}
 \boxed{\;t_\text{rep} \;=\; n_\text{slots}\times n_\text{readouts per slot}\times \tau\;}
 \label{eq:trep}
 \end{equation}
 
-At the current default (2 slots, 1 readout each, $\tau=\SI{120}{\micro\second}$):
-\[
-t_\text{rep} = 2\times 1\times \SI{120}{\micro\second} = \SI{240}{\micro\second}
-\qquad\Longrightarrow\qquad \SI{4167}{\hertz}\ \text{per rep}.
-\]
+Worked through for every configuration this project runs, at
+$\tau=\SI{120}{\micro\second}$:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lccrrr@{}}
+\toprule
+\hd{Configuration} & \hd{slots} & \hd{reads/slot} & \hd{$t_\text{rep}$} & \hd{cadence} & \hd{reads/shot} \\
+\midrule
+two-point, forward, skip ref \emph{(default)} & 2  & 1 & \SI{240}{\micro\second}  & \SI{4167}{\hertz} & 2 \\
+two-point, forward, with ref                  & 2  & 2 & \SI{480}{\micro\second}  & \SI{2083}{\hertz} & 4 \\
+two-point, ABBA, skip ref                     & 4  & 1 & \SI{480}{\micro\second}  & \SI{2083}{\hertz} & 4 \\
+16-point, forward, skip ref                   & 16 & 1 & \SI{1.92}{\milli\second} & \SI{521}{\hertz}  & 16 \\
+16-point, forward, with ref \emph{(Step 4S)}  & 16 & 2 & \SI{3.84}{\milli\second} & \SI{260}{\hertz}  & 32 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The last column is not decoration: it is what the accumulated buffer budget is
+spent on, and \S\ref{sec:buffer} and the streaming chapters both come back to it.
 
 \begin{keybox}[The relax windows do not appear in Eq.~\ref{eq:trep}, and that is measured]
-An earlier model added the two relax windows per slot, giving
-$n_\text{slots}\times(\tau + 2\times\SI{3.3}{\micro\second})$. The measurement
-does not support it. Across the burst runs the cadence is
-\SI{426.0}{\micro\second} at $\tau=\SI{213}{\micro\second}$ --- exactly
-$2\times 213$ --- and \SI{240.0}{\micro\second} at
-$\tau=\SI{120}{\micro\second}$ --- exactly $2\times 120$. The relax and sync
-windows overlap the readout rather than following it. \co{time_per_rep()} was
-corrected accordingly; \co{include_relax=True} restores the old sum as a
-conservative upper bound.
+An earlier model added the relax windows, giving
+$n_\text{slots}\times(\tau + 2\times\SI{3.2552}{\micro\second})$. Reading the
+source narrows that to \emph{one} \co{sync_all} per slot rather than two (the
+closing \co{trigger} sets no timestamp --- see the box in \S\ref{sec:asm}), and
+the measurement removes even that one: across four 2026-08-06 burst runs the
+cadence is \SI{423.8}{}--\SI{425.4}{\micro\second} at
+$\tau=\SI{213}{\micro\second}$, against \SI{426.0}{\micro\second} for
+$2\times\tau$ and \SI{432.5}{\micro\second} for the sync-inclusive sum. The
+measurement is \emph{below} $2\tau$, so the sync term is not resolvable.
+\co{time_per_rep()} implements Eq.~\ref{eq:trep}; \co{include_relax=True}
+restores the old sum as a conservative upper bound if you want headroom rather
+than an estimate.
 \end{keybox}
 
 \section{What the accumulated buffer holds}

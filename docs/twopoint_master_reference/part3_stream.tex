@@ -85,7 +85,56 @@ Compare Method A, where 79\% of the period is host overhead, and Method B, where
 26\% is overhead and waste.
 \end{keybox}
 
-\subsection{Rate against binning}
+\section{Every parameter of the streaming cell, one at a time}
+\label{sec:streamparams}
+
+Step 4C has six knobs and three of them behave in ways that are not obvious from
+their names. This section is the reference for all of them.
+
+\subsection{\texorpdfstring{\co{STREAM_TARGET_HZ} and the bin}{STREAM\_TARGET\_HZ and the bin}}
+\label{sec:bin}
+
+You ask for a rate; the cell converts it into an integer number of reps to average
+per output sample, and that integer --- not your request --- sets the rate:
+
+\begin{equation}
+\co{bin} = \max\!\left(1,\ \operatorname{round}\!\left(\frac{1}{\co{STREAM_TARGET_HZ}\times t_\text{rep}}\right)\right),
+\qquad
+f_\text{achieved} = \frac{1}{\co{bin}\times t_\text{rep}}.
+\label{eq:bin}
+\end{equation}
+
+At $t_\text{rep}=\SI{240}{\micro\second}$, asking for \SI{1000}{\hertz} gives
+$\co{bin}=\operatorname{round}(4.167)=4$ and therefore
+\textbf{\SI{1041.7}{\hertz}}, not \SI{1000}{\hertz}. That is why every streamed
+file in this project reports \SI{1041.7}{\hertz}: it is the nearest achievable
+rate, and reps cannot be split.
+
+Four things follow from the bin being a \emph{mean} of consecutive reps rather
+than a decimation, and all four matter:
+
+\begin{enumerate}
+  \item \textbf{It averages, so it buys $\sqrt{\co{bin}}$ in $\sigma$.} Dropping
+  3 of every 4 reps would not. At \co{bin} = 4 that is a factor of 2 --- the same
+  free averaging Method A gets from filling the call floor (\S\ref{sec:freeavg}),
+  obtained here without giving up any rate you were going to use.
+  \item \textbf{It anti-aliases, at $1/(2\,\co{bin}\,t_\text{rep})$.} A boxcar of
+  \co{bin} reps has its first null at $f_\text{achieved}$ and rolls off as
+  $|\operatorname{sinc}|$ before it, so noise between $f_\text{achieved}/2$ and
+  the raw \SI{4167}{\hertz} is suppressed rather than folded back in. This is the
+  reason to bin in the acquisition cell rather than to record raw and decimate
+  afterwards.
+  \item \textbf{Bins never straddle a packet boundary.} Reps left over at the end
+  of a packet are carried into the next one (\co{_pending} in the cell), so a bin
+  is always \co{bin} consecutive reps of the same continuous run. Packet
+  boundaries are an artefact of when the host drained the queue and mean nothing
+  physical; a bin that straddled one would still be correct, but the carry makes
+  the sample count exactly $\lfloor N_\text{reps}/\co{bin}\rfloor$ regardless of
+  how the packets happened to land.
+  \item \textbf{The timestamp is the bin centre.} \co{(first_rep + (i + 0.5) *
+  bin) * cadence}. Using the bin's first rep would bias every sample early by
+  $\co{bin}\,t_\text{rep}/2$ --- \SI{480}{\micro\second} at \co{bin} = 4.
+\end{enumerate}
 
 \begin{center}
 \small
@@ -95,7 +144,7 @@ Compare Method A, where 79\% of the period is host overhead, and Method B, where
 \midrule
 1 & \SI{240}{\micro\second} & \textbf{4166.7\,Hz} & \co{STREAM_TARGET_HZ = None}; every rep kept \\
 2 & \SI{480}{\micro\second} & 2083.3\,Hz & \\
-\textbf{4} & \textbf{\SI{960}{\micro\second}} & \textbf{1041.7\,Hz} & what ran on 2026-08-14 \\
+\textbf{4} & \textbf{\SI{960}{\micro\second}} & \textbf{1041.7\,Hz} & what ran on 2026-08-14 and 2026-08-17 \\
 8 & \SI{1920}{\micro\second} & 520.8\,Hz & \\
 42 & \SI{10.08}{\milli\second} & 99.2\,Hz & equivalent averaging to Method A, at 100\% duty \\
 \bottomrule
@@ -104,8 +153,86 @@ Compare Method A, where 79\% of the period is host overhead, and Method B, where
 
 The last row is worth noting: streaming with \co{bin = 42} produces the same
 averaging as the recommended Method A operating point, at the same rate, but with
-100\% duty cycle instead of 21\% --- i.e. \emph{if the streaming noise defect were
+100\% duty cycle instead of 21\% --- i.e. \emph{if the streaming noise excess were
 resolved}, streaming would dominate Method A at every rate.
+
+\subsection{\texorpdfstring{\co{STREAM_DURATION_SEC}, \co{total_reps} and \co{cfg.reps} --- all the same number}{STREAM\_DURATION\_SEC, total\_reps and cfg.reps}}
+
+The tProc loops \co{cfg.reps} times and then ends. The rep count \emph{is} the
+run length, it is compiled into the program, and it cannot be changed once the
+program is uploaded. So the cell computes
+
+\[
+\co{total_reps} = \operatorname{round}\!\left(\frac{\co{STREAM_DURATION_SEC}}{t_\text{rep}}\right)
+\]
+
+\noindent and builds the program with \co{cfg.reps} set to it.
+\co{stream()} raises \co{ValueError} if the two disagree rather than quietly
+streaming a different length than you asked for. At \SI{30}{\second} and
+$t_\text{rep}=\SI{240}{\micro\second}$ that is \num{125000} reps, giving
+$\num{125000}/4 = \num{31250}$ samples --- which is exactly the row count of
+every streamed CSV in the 2026-08-17 session.
+
+There is no way to stop early and keep a valid file beyond interrupting the cell:
+Ctrl-C ends the generator, the \co{finally} leaves the board idle, and
+\co{stream_qc()["aborted"]} records that the run was short.
+
+\subsection{\texorpdfstring{\co{poll_timeout_s} --- and why it is currently unreachable}{poll\_timeout\_s}}
+
+\co{stream(poll_timeout_s=10.0)} is a client-side guard: if the board sends
+nothing for this long, raise instead of waiting forever. It only does anything
+when the poll is bounded, and as of the 2026-08-17 fix the poll is blocking by
+default (\co{POLL_TIMEOUT_S = None}), so on the healthy path this guard is never
+reached. That is deliberate, and \S\ref{sec:wedge} is the argument for it. What
+protects an interrupted run is the generator's \co{finally}, not this timeout.
+
+To arm it for a diagnostic run, set the class attribute for the session:
+
+\begin{center}\co{MultipointLockinODMR.POLL_TIMEOUT_S = 5.0}\end{center}
+
+\subsection{Stride, packet size and \texorpdfstring{\co{avg_maxlen}}{avg\_maxlen}}
+\label{sec:stride}
+
+None of these are host-side settings; they are consequences of the firmware and
+the board worker, and they are what \co{stream_headroom()} reports.
+
+\begin{center}
+\small
+\begin{tabular}{@{}l>{\raggedright\arraybackslash}p{10.4cm}@{}}
+\toprule
+\hd{Quantity} & \hd{What it is} \\
+\midrule
+\co{avg_maxlen} & Length of the accumulated buffer, in entries, from the
+  firmware. One entry per readout per rep. \\
+\co{reads_per_shot} & $n_\text{slots}\times n_\text{readouts per slot}$ --- 2 for
+  the two-point default, \textbf{32} for a 16-point run with references. \\
+\co{shots_that_fit} & \co{avg_maxlen // reads_per_shot}. The buffer budget is
+  shared across every readout in a shot, so a 16-point run has sixteen times less
+  room than a two-point one. \\
+stride & \co{max(1, int(0.1 * shots_that_fit))}. The board worker transfers this
+  many shots at a time --- 10\% of the buffer, chosen by qick, not by us. \\
+packet size & Whatever the worker had ready when the host polled: on 2026-08-14,
+  38--500 reps, median 205. It varies, and \emph{it does not matter}: the rep axis
+  is carried in \co{first_rep}/\co{n_reps}, so the timestamps are exact regardless
+  of how the data was parcelled up. \co{stream_qc()} proves that on the data. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The failure mode is overflow: if unread samples ever reach \co{avg_maxlen}, the
+worker raises and the run dies. Run \co{stream_headroom()} before a long stream
+and check that \co{shots_that_fit} is several strides' worth. This has never bound
+on the two-point path and is a live constraint on the multipoint one
+(Ch.~\ref{ch:mpstream}).
+
+\begin{openbox}[\co{stream_headroom()} silently failed for the whole 2026-08-17 session]
+It read \co{qd.soc['readouts'][ch]['avg_maxlen']}, and \co{qd.soc} is a Pyro
+\co{Proxy}: a proxy forwards \emph{method calls} but not \co{__getitem__}, so
+this raised \co{'Proxy' object is not subscriptable} and the cell printed
+``could not read avg_maxlen'' instead of a number. The subscriptable object is
+\co{qd.soccfg}, the local \co{QickConfig} that qick's \co{make_proxy()} builds
+from \co{soc.get_cfg()}. Fixed 2026-08-17; the check now runs.
+\end{openbox}
 
 \section{Verification: the guarantees, checked on the data}
 

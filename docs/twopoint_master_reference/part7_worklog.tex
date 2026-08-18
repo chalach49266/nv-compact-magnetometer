@@ -5,6 +5,14 @@ Repository: \file{github.com/chalach49266/nv-compact-magnetometer}, branch
 \co{main}. All commits below are pushed. The two sessions are separated because the
 second one partly retracts the first.
 
+\begin{retractbox}[title=\textbf{Read Round 7 first --- the acquisition path was reverted}]
+On 2026-08-18 the acquisition \emph{modules} were reset to revision \co{8fd303f},
+the one the second machine takes good data with. Everything Rounds 3, 4 and 6
+changed on that path is \textbf{no longer in the code}. The notebooks were kept.
+Rounds 1, 2 and 5 stand: measurement, analysis and figure saving, none of which
+touch acquisition.
+\end{retractbox}
+
 \section{Round 1 --- 2026-08-12, against the 2026-08-06 session}
 
 \begin{center}
@@ -100,6 +108,13 @@ auto-zero \co{acquire()}, and \co{Ctrl-C} would not release it. Diagnosed to
 \S\ref{sec:wedge}; the naming collision in \S\ref{sec:namecollision} was found while
 tracing which file each mode had written.
 
+\begin{retractbox}[title=\textbf{Read Round 4 before acting on anything in this section}]
+The central change below --- bounding every poll --- was \textbf{withdrawn the same
+day}. It broke burst and streaming on first contact with the board.
+\S\ref{sec:boundedpollretraction} is the account; \S\ref{sec:round4} is what
+replaced it. The interrupt cleanup and the naming split survive unchanged.
+\end{retractbox}
+
 \begin{center}
 \small
 \begin{tabular}{@{}lp{10.4cm}@{}}
@@ -159,10 +174,113 @@ Stream completion & same, run to 20/20 reps &
 \end{center}
 
 
+\section{Round 4 --- 2026-08-17 evening, undoing Round 3's central change}
+\label{sec:round4}
+
+Round 3 shipped at 14:23 and the rig session at 14:25--14:29 showed it had broken
+two of the three acquisition methods. The evidence is the notebook's own saved
+outputs:
+
+\begin{center}
+\small
+\begin{tabular}{@{}cllll@{}}
+\toprule
+\hd{Cell} & \hd{Step} & \hd{exec} & \hd{reps in the failing call} & \hd{Result} \\
+\midrule
+18 & 4A averaged & 21 & 35   & worked --- 1067 samples, \SI{104.5}{\hertz} \\
+22 & 4B burst    & 25 & 2000 & \co{TimeoutError}: read 0 of 2000 shots in \SI{10}{\second} \\
+26 & 4C stream   & 27 & 2000 & hung in \co{Pyro4 socketutil.recvall}; released by \co{Ctrl-C} \\
+24 & 5B analysis & 47 & ---  & \co{TypeError: ... not 'NoneType'} (collateral) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both real failures are the dedicated large-reps auto-zero \co{acquire()}, which
+4A never makes. The comparison that settled it was the 2026-08-17 \emph{morning}
+session, taken on a second computer at \co{8fd303f} --- before Round 3 --- which
+streamed \num{31250} samples at \SI{1041.7}{\hertz} with zero missing reps, four
+times over. Same rig, same board, same day; the only difference was the code.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lp{10.4cm}@{}}
+\toprule
+\hd{Scope} & \hd{What it did} \\
+\midrule
+\co{revert(qickdawg):} &
+  \co{POLL\_TIMEOUT\_S} back to \co{None}, restoring qick's blocking
+  \co{poll\_data()}. The no-progress deadline is now consulted only when the poll
+  is bounded, which it no longer is by default; set the class attribute to a float
+  for a diagnostic run. \S\ref{sec:boundedpollretraction} carries the reason at
+  length so this is not re-attempted. \\[3pt]
+\co{fix(qickdawg):} &
+  An empty return under a blocking poll now raises, naming how many shots were
+  read. Previously that condition spun on the board with RPCs; the naive
+  alternative would short-read zeros into the tail of \co{d\_buf}. \\[3pt]
+\co{fix(twopoint):} &
+  \co{ensure\_idle()} reports and no longer calls \co{recover()} implicitly.
+  \co{recover()} is staged: stop, drain the data queue, and only escalate to
+  \co{start\_worker()} if the board is still not idle (\co{force=True} skips
+  ahead). Steps 4A/4B/4C raise and point at the new Step~0 instead of continuing
+  into a hang. \\[3pt]
+\co{fix(twopoint):} &
+  \co{stream\_headroom()} read \co{qd.soc['readouts']}, and \co{qd.soc} is a Pyro
+  \co{Proxy} --- not subscriptable --- so the check printed an error for the whole
+  2026-08-17 session instead of a number. It now uses \co{qd.soccfg}. This is the
+  check the multipoint streaming path actually depends on. \\[3pt]
+\co{fix(notebook):} &
+  \co{twopoint\_postprocess.process(None)} raises a named error saying which run
+  cell to re-run; Steps 5A/5B/5C fall back to the newest matching CSV on disk.
+  \co{default\_config.mw\_gain} hoisted to a named \co{MW\_GAIN} constant with its
+  provenance --- it went \num{10500}$\rightarrow$\num{15000} inside a commit whose
+  subject was ``normalise JSON encoding''. \\[3pt]
+\co{feat(notebook):} &
+  Steps 4S and 5S in \file{Modules/Lockin_module.ipynb}: streaming for the
+  multipoint lock-in with its own post-processing and vector reconstruction
+  (Ch.~\ref{ch:mpstream}). \\[3pt]
+\co{test(scripts):} &
+  \file{scripts/test\_drain\_readout.py}, which exercises the drain loop against
+  \co{qick}'s \emph{real} \co{poll\_data} rather than a mock --- the gap that let
+  Round 3 ship. 17 checks, no board needed. \\[3pt]
+\co{docs(scripts):} &
+  \file{scripts/analyze\_twopoint\_0817.py} regenerates every 2026-08-17 number in
+  this document. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{keybox}[The process lesson, which is the expensive one]
+Round 3's commit message says ``Verified offline (no board)''. It was --- against a
+mock written alongside the fix, which modelled \co{poll\_data} as ``returns
+packets, or \co{[]} on timeout''. The real \co{poll\_data} also discards a packet
+when \co{stop\_flag} is set, and returns \co{[]} the moment its \SI{100}{\milli\second}
+\co{totaltime} expires. Neither behaviour was in the mock, and both matter.
+
+\file{scripts/test\_drain\_readout.py} now extracts \co{poll\_data}'s source from
+the installed \co{qick} and executes it, and fails loudly if that extraction stops
+matching. A mock of the component you are debugging tests your belief about it,
+not it.
+\end{keybox}
+
+\begin{openbox}[title=\textbf{Two more traps found while tracing this, both still live}]
+\begin{itemize}
+  \item \textbf{\co{qickdawg} resolves to the wrong checkout unless the project
+        root is first on \co{sys.path}.} It is pip-installed editable from
+        \file{\textasciitilde/Documents/PhD/NV Compact Magnetometer/qick-dawg/src},
+        which carries none of this project's patches. The notebooks are safe --- cell~0
+        inserts \co{PROJECT\_ROOT} at position 0 --- but a bare
+        \co{python scripts/foo.py} is not. \file{test\_drain\_readout.py} asserts
+        which copy it imported; other scripts do not.
+  \item \textbf{The burst replay reproduces on a second machine.} 50.0--50.8\%
+        across six 2026-08-17 morning burst files, at \co{8fd303f}. It is not an
+        artefact of this laptop, and it is not the wedge (\S\ref{sec:replay}).
+\end{itemize}
+\end{openbox}
+
 \section{The notebook layout}
 \label{sec:notebook}
 
-\file{Modules/Twopoint_Lockin_module.ipynb}, 32 cells. Step 4 used to be a single
+\file{Modules/Twopoint_Lockin_module.ipynb}, 34 cells. Step 4 used to be a single
 26\,kB cell with a \co{LIVE_BURST_MODE} switch, and Step 5 a single generic analysis
 cell that treated all three methods alike --- which is wrong in a different way for
 each of them.
@@ -173,26 +291,36 @@ each of them.
 \toprule
 \hd{Cells} & \hd{Section} & \hd{Contents} \\
 \midrule
-0--8   & setup, ODMR sweep & project root, \co{default_config} ($\tau$ set here),
-  DSA attenuation, the reference ODMR sweep \\
-9--12  & Step 1a / 1b & pick the peak to track; place the parked pair and build
+0--5   & setup & project root, \co{MW_GAIN} and \co{default_config} ($\tau$ set
+  here), DSA attenuation \\
+6--7   & \textbf{Step 0} & board recovery. Skip it on a normal day; run it after
+  any interrupted acquisition (\S\ref{sec:wedge}) \\
+8--10  & ODMR sweep & the reference sweep \\
+11--14 & Step 1a / 1b & pick the peak to track; place the parked pair and build
   \co{TWOPOINT_CALIB} (this is where the slopes and baselines come from) \\
-13--16 & Step 2 / 3 & one batch at the two parked frequencies; apply the conversion \\
+15--18 & Step 2 / 3 & one batch at the two parked frequencies; apply the conversion \\
 \midrule
-17--18 & \textbf{Step 4A} & averaged acquisition. Measures the host floor, sizes
-  \co{reps} to fill it, prints the alias warning \\
-19--20 & Step 5A & \co{process_averaged} + ASD, $\sim$15 lines \\
-21--22 & \textbf{Step 4B} & burst acquisition, \co{on_stale="drop"}, cadence-based
-  timestamps, reports \co{BURST_STALE_FRACTION} \\
-23--24 & Step 5B & \co{process_burst} + per-segment ASD \\
-25--26 & \textbf{Step 4C} & streaming acquisition, \co{stream_qc()} assertions \\
-27--28 & Step 5C & \co{process_stream} + ASD, optional mains notch \\
-29--30 & Step 6 & post-process \emph{any} saved run; mode detected from the columns;
+19--20 & \textbf{Step 4A} & averaged acquisition. Measures the host floor, sizes
+  \co{reps} to fill it, prints the alias warning. Writes \co{twopoint_lockin_avg_*} \\
+21--22 & Step 5A & \co{process_averaged} + ASD, $\sim$15 lines \\
+23--24 & \textbf{Step 4B} & burst acquisition, \co{on_stale="drop"}, cadence-based
+  timestamps, reports \co{BURST_STALE_FRACTION}. Writes \co{twopoint_lockin_burst_*} \\
+25--26 & Step 5B & \co{process_burst} + per-segment ASD \\
+27--28 & \textbf{Step 4C} & streaming acquisition, \co{stream_qc()} assertions.
+  Writes \co{twopoint_lockin_stream_*} \\
+29--30 & Step 5C & \co{process_stream} + ASD, optional mains notch \\
+31--32 & Step 6 & post-process \emph{any} saved run; mode detected from the columns;
   side-by-side comparison table \\
-31     & Caveats & what the method does and does not measure \\
+33     & Caveats & what the method does and does not measure \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+Each Step 4x opens with a one-RPC \co{ensure_idle()} that raises and points at
+Step~0 rather than starting into a board that is not free. Each Step 5x falls back
+to the newest run of its own mode on disk when its partner's \co{*_LAST_CSV} is
+unset, so a failed acquisition produces a sentence rather than a \co{TypeError}
+from inside \co{pathlib}.
 
 Each Step 4x is self-contained --- it builds its own program, primes, auto-zeroes and
 writes its own CSV --- with the parameters that change run to run inline, where they
@@ -200,6 +328,349 @@ are edited. Each Step 5x reads the run its partner just wrote. The shared mechan
 plumbing (append-only CSV writer, row building, the timing/freshness/calibration
 reports, the standard figure) lives in \file{notebook_modules/twopoint_runner.py} so
 that 4A and 4B do not carry 150 duplicated lines each.
+
+\section{Round 6 --- 2026-08-18, the shot counter was never cleared}
+\label{sec:counter}
+
+\begin{keybox}[One missing line, and it was never in this file]
+\co{acquire()} and \co{stream()} arm the board-side readout without first zeroing
+the tProc shot counter. qick's own \co{AcquireProgram.start_round()} does it one
+line after \co{reload_mem()}:
+\begin{quote}\small\ttfamily
+soc.reload\_mem()\\
+\# make sure count variable is reset to 0\\
+soc.clear\_tproc\_counter(addr=self.counter\_addr)
+\end{quote}
+The vendored \file{qickdawg/nvpulsing/nvaverageprogram.py} reproduces every other
+step of that sequence and drops this one.
+\end{keybox}
+
+\subsection{What the counter does}
+
+It is tProc \emph{data memory} at \co{counter_addr}, and nothing in the acquire
+path resets it: the program only ever increments it, \co{stop_tproc(lazy=True)}
+is a documented no-op on tProc v1 (\S\ref{sec:rpc}, stage 1b), and
+\co{reload_mem()} reloads the program's own data, not this address. So it carries
+the previous run's final value into the next run.
+
+The board-side worker (\file{qick/streamer.py}) then does:
+
+\begin{quote}\small\ttfamily
+shots = self.soc.get\_tproc\_counter(addr=counter\_addr)\\
+if shots >= min(last\_shots+stride, total\_shots):\\
+\ \ \ \ newshots = shots - last\_shots\quad\#\ last\_shots starts at 0\\
+\ \ \ \ data = self.soc.get\_accumulated(ch=ch, address=addr,\\
+\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ length=newshots*reads\_per\_count)
+\end{quote}
+
+With a stale counter that test passes on the worker's \emph{first} look, before
+the new program has written anything, and it transfers whatever is sitting in the
+accumulated buffer. Two outcomes, depending only on how the stale value compares
+to the new run's length:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lp{9.6cm}@{}}
+\toprule
+\hd{Stale counter} & \hd{What happens} \\
+\midrule
+$>$ \co{total_count} &
+  One oversized packet. \textbf{This is the 2026-08-18 crash}: a 100-rep priming
+  \co{acquire()} inherited 2000 from the preceding auto-zero and raised
+  \co{ValueError: could not broadcast input array from shape (4000,2) into shape
+  (200,2)} --- $2000\times2$ readouts into a $100\times2$ array. \\[3pt]
+$=$ \co{total_count} &
+  \textbf{No error at all.} The call returns in milliseconds with the
+  \emph{previous} run's contents. \\[3pt]
+$<$ \co{total_count} &
+  A short head of stale data, then the run proceeds normally. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Which paths were affected}
+
+\co{reset_tproc=True} routes \co{config_all} through \co{stop_tproc(lazy=False)},
+which on tProc v1 is \co{tproc.reset()} + \co{reload_program()} --- and a reset
+plausibly zeroes data memory as a side effect. That is why the damage is uneven:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lcp{6.4cm}@{}}
+\toprule
+\hd{Call site} & \hd{\co{reset_tproc}} & \hd{Exposure} \\
+\midrule
+Step 4A, every sample            & default \co{False} & every call after the first inherited the last one's count \\
+Step 4B, the burst \co{acquire}  & \textbf{\co{True}} & probably protected by the reset \\
+Step 4B/4C priming and auto-zero & default \co{False} & \textbf{where the crash happened} \\
+Step 4C \co{stream()}            & n/a                & armed \co{start_readout} directly, never cleared \\
+ODMR sweep, Steps 1--3           & default \co{False} & one \co{acquire} per sweep point \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{openbox}[Do not yet credit this with the burst replay]
+It is the obvious suspect for \S\ref{sec:replay} --- ``the call returns in
+\SI{13}{\milli\second} instead of \SI{425}{\milli\second} with 95.7\% of its rows
+bit-identical to the batch before'' is exactly the middle row of the table above.
+But burst mode is the one path that passes \co{reset_tproc=True}, so if the v1
+reset does zero the counter, burst was already protected and its replay has
+another cause.
+
+The rig settles it in one line, run straight after a burst batch:
+\begin{center}\co{qd.soc.get_tproc_counter(addr=1)}\end{center}
+Zero means the reset clears it and the replay is something else. Non-zero means
+this was the cause all along, and \S\ref{sec:replay} can be closed. Step 0's
+\co{recover()} now prints the value for exactly this reason.
+\end{openbox}
+
+\subsection{The fix}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lp{8.8cm}@{}}
+\toprule
+\hd{Where} & \hd{Change} \\
+\midrule
+\co{acquire()} & \co{clear_tproc_counter(addr=self.counter_addr)} between
+  \co{reload_mem()} and \co{start_readout()}, matching qick. One RPC,
+  $\sim$\SI{1}{\milli\second}, on a call that already costs 10--11\,ms. \\[3pt]
+\co{stream()} & the same, in the same position. \\[3pt]
+\co{_drain_readout()} & an oversized packet now raises a named \co{RuntimeError}
+  that says the counter did not start at zero, instead of letting numpy raise
+  \co{could not broadcast}, which names neither cause nor fix. \\[3pt]
+\co{_abort_readout()} & clears it on the way out, so an interrupted cell does not
+  hand a poisoned counter to whatever runs next. \\[3pt]
+\co{recover()} & reads the counter, prints it, clears it. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{No notebook cell changed.} Every acquisition in both notebooks goes
+through \co{acquire()} or \co{stream()}; the vendored qickdawg has exactly one
+\co{start_readout} call site and \co{stream()} is the other, and every
+\co{LockinODMR}-style subclass delegates to \co{NVAveragerProgram.acquire} via
+\co{super()}.
+
+\subsection{Verified}
+
+\file{scripts/test_shot_counter.py}, 21 checks. It drives qick's \emph{real}
+\co{DataStreamer._run_readout} against a fake board whose counter persists between
+runs and whose program ramps the counter rather than completing instantly --- the
+arithmetic under test lives in that worker, so a mock of the worker would prove
+nothing. It reproduces the exact reported shapes, \co{(4000,2)} into
+\co{(200,2)}, and shows the clear removes them; shows the equal-counter case
+completing silently with data read before the program produced it; and confirms
+the call is present in the shipped \co{acquire()}, \co{stream()},
+\co{_abort_readout()} and \co{recover()}, in the right order relative to
+\co{reload_mem} and \co{start_readout}.
+
+\section{Round 7 --- 2026-08-18, revert the acquisition path to \texorpdfstring{\co{8fd303f}}{8fd303f}}
+\label{sec:revert}
+
+Three rounds of changes to the acquisition path each fixed something real and each
+left the rig worse than it found it. On 2026-08-18 the operator reported that
+streaming still did not run and that averaged mode had fallen to \SI{48}{\hertz},
+against the 87--105\,Hz it had held all week, and asked for the path to be made
+identical to the revision on the second machine.
+
+\begin{center}
+\small
+\begin{tabular}{@{}llp{6.0cm}@{}}
+\toprule
+\hd{File} & \hd{State} & \hd{Why} \\
+\midrule
+\file{qickdawg/nvpulsing/nvaverageprogram.py} & \textbf{byte-identical to \co{8fd303f}} & the acquire loop and the poll \\
+\file{notebook_modules/multipoint_lockin_program.py} & \textbf{byte-identical to \co{8fd303f}} & \co{stream()}, the timing model \\
+\emph{all 35} \file{qickdawg/*.py} & \textbf{identical} & nothing else on the path drifted \\
+\midrule
+\file{Modules/*.ipynb} & \textbf{kept} & the revert is the acquisition \emph{modules}; the notebooks keep Step 0, the \co{_avg_}/\co{_burst_}/\co{_stream_} names, \co{mw_gain = 15000}, the newest-run fallbacks, Steps 4S/5S and figure saving \\
+\file{notebook_modules/twopoint_postprocess.py} & kept & post-processing only; never on the acquire path \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The only notebook edit the revert forced: Step 0 and the three pre-flight guards
+called \co{recover()} and \co{ensure_idle()}, which live in the acquisition module
+and went away with it. Both are now written inline against the raw \co{QickSoc}
+proxy --- \co{stop_tproc}, \co{streamer.stop_readout}, \co{poll_data(totaltime=-1)},
+\co{streamer.readout_running} --- all plain remote methods qick itself exposes. So
+the notebook keeps the escape hatch and is independent of which module revision is
+loaded. The guard also downgraded from fatal to a warning on probe failure: a
+board-state probe must never be able to stop a run.
+
+\subsection{What went away with it}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lp{8.6cm}@{}}
+\toprule
+\hd{Gone from the modules} & \hd{Consequence} \\
+\midrule
+\co{POLL_TIMEOUT_S}, \co{_drain_readout} & the poll is qick's plain
+  \co{poll_data()} again --- blocking, which is the behaviour that worked. \\
+\co{_abort_readout()} & an interrupted cell no longer stops the tProc on the way
+  out. After a Ctrl-C mid-readout, run Step 0; if it still reports busy, restart
+  the board's Pyro server. A kernel restart will not clear it. \\
+\co{ensure_idle()}, \co{recover()} & reimplemented in the notebook instead, as
+  above. \\
+\co{clear_tproc_counter()} & the stale-counter behaviour of \S\ref{sec:counter} is
+  live again --- see the box below. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The hardware operating point is \emph{unchanged}: \co{mw_gain = 15000},
+$\tau = \SI{120}{\micro\second}$, \co{AVG_REPS_PER_BATCH = None},
+\co{BURST_REPS = 500}, \co{STREAM_TARGET_HZ = 1000}. Those live in the notebook,
+not in the reverted modules.
+
+\begin{openbox}[The stale shot counter is real and is now unfixed]
+\S\ref{sec:counter} is not retracted --- the mechanism was reproduced against
+qick's own \co{DataStreamer._run_readout}, and \co{8fd303f} is missing the same
+call qick makes. It is an open defect of the reverted revision, and it is the
+leading candidate for the burst replay of \S\ref{sec:replay}.
+
+\file{scripts/test_shot_counter.py} is kept for that reason, scoped down to the
+mechanism: 13 checks, all passing, none of them asserting anything about the
+shipped code. If the fix is revisited, that test is the check it needs to pass.
+\end{openbox}
+
+\subsection{The lesson this round is actually about}
+
+Every one of Rounds 3, 4 and 6 was reasoned from the source, verified offline
+against a test, and shipped --- and each one changed the rate or broke a mode on
+first contact with the rig. Round 3 was verified against a mock and broke burst
+and streaming. Round 6 was verified against qick's real worker thread and, whatever
+else it did, coincided with averaged mode falling to \SI{48}{\hertz}.
+
+Offline verification says the code does what you think. It says nothing about
+whether what you think is worth doing. \textbf{On this rig, the acquisition path
+changes one thing at a time, with a before-and-after run on the bench, or it does
+not change.}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrl@{}}
+\toprule
+\hd{Session} & \hd{Averaged rate} & \hd{Path revision} \\
+\midrule
+2026-08-14 & 86.8--88.8\,Hz & \co{8fd303f} lineage \\
+2026-08-17 morning \emph{(other machine)} & --- & \co{8fd303f} \\
+2026-08-17 afternoon & 104.5\,Hz & \co{9832e07} (burst + stream broken) \\
+2026-08-18 & \textbf{48\,Hz} & Round 6 \\
+2026-08-18, after this revert & \emph{to be measured} & \co{8fd303f} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The last row is the first thing to fill in at the rig.
+
+\section{Round 5 --- 2026-08-18, every figure goes to disk}
+\label{sec:autosave}
+
+Neither notebook wrote a single PNG. Every plot lived only in cell output, which
+"Restart \& Clear Outputs" discards and which cannot be opened next to the CSV it
+describes. The \co{*_result.png}/\co{*_fft.png} pairs already sitting in
+\file{data/results/} were produced by a separate tool on the acquisition machine,
+not by these notebooks --- nothing in this repository wrote them.
+
+\subsection{\texorpdfstring{\co{notebook_modules/figure_autosave.py}}{figure\_autosave.py}}
+
+Saving is automatic rather than a \co{savefig} line per plot, because there are
+twenty-three plotting sites across the two notebooks and adding a line to each
+guarantees the twenty-fourth is forgotten.
+
+The module hooks the two moments at which the inline backend destroys a figure:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lp{9.2cm}@{}}
+\toprule
+\hd{Hook} & \hd{What it catches} \\
+\midrule
+\co{post_execute} callback &
+  Figures a cell drew but never explicitly showed. It must run \emph{before}
+  matplotlib-inline's \co{flush_figures}, which displays and then closes
+  everything; IPython fires \co{post_execute} in registration order, so
+  \co{enable()} registers its own callback and then re-registers
+  \co{flush_figures} to move it to the back of the queue. \\[3pt]
+wrapper around \co{pyplot.show} &
+  Figures closed mid-cell. \co{show()} on this backend closes what it displays,
+  and \co{twopoint_runner.plot_run}, \co{TwoPointResult.figure(show=True)} and the
+  live loops in \file{Lockin_module.ipynb} all call it. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both funnel into \co{capture()}, and the ``already written'' marker lives on the
+figure object, so the two hooks cannot duplicate each other's work.
+
+\subsection{Naming}
+
+\co{set_run(csv, tag=...)} points the module at a run: the PNGs take the CSV's
+stem and land in the CSV's own folder. The numbering restarts on every
+\co{set_run}, so \textbf{re-running a cell overwrites that cell's own PNGs}
+instead of accumulating copies.
+
+\begin{center}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\hd{Cell} & \hd{Writes} \\
+\midrule
+Step 4A/4B/4C \co{set_run(AVG_CSV, tag="run")} & \co{twopoint_lockin_avg_<ts>_run_result.png} \\
+Step 5A/5B/5C \co{set_run(A5_CSV)} & \co{twopoint_lockin_avg_<ts>_result.png} \\
+ & \co{twopoint_lockin_avg_<ts>_fft.png} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A figure is classified \co{_fft} only when \emph{all} of its axes are log--log
+spectra. That matters here: the three-panel figure from
+\co{TwoPointResult.figure()} carries an ASD as its last panel, and must not claim
+the \co{_fft} name from the standalone spectrum figure of the same run. A cell can
+override the classification entirely with \co{fig.set_label("droop")}, giving
+\co{<stem>_droop.png}.
+
+\subsection{\texorpdfstring{\co{TwoPointResult.spectrum_figure()}}{spectrum\_figure()}}
+
+Added so that every two-point run gets a real \co{_fft.png} rather than only the
+ASD panel buried at a third height inside \co{figure()}. Full width, with the
+white floor, $\eta$ from $\sigma$, and every line above 2$\times$ the floor
+annotated with its excess. Steps 5A/5B/5C call it after \co{figure()}.
+
+\subsection{Verified}
+
+\begin{itemize}
+  \item \file{scripts/test_figure_autosave.py} --- 18 checks, driven through a
+        real \co{InteractiveShell} with \co{\%matplotlib inline} rather than a
+        mock, because hook ordering against \co{flush_figures} is the whole
+        mechanism. Confirms the ordering explicitly, and covers the unshown-figure
+        path, the \co{plt.show()} path, the mixed-figure classification, tags,
+        overwrite-on-rerun, empty figures, \co{disable()}/re-\co{enable()} and the
+        label override.
+  \item \file{scripts/test_notebook_figure_saving.py} --- runs Step 5B and Step 5C
+        \emph{out of the \co{.ipynb} files} against scratch copies of the
+        2026-08-17 runs, and checks both PNGs appear beside the CSV and that a
+        second run overwrites them. 6 checks.
+  \item A static pass over both notebooks asserts every cell that draws calls
+        \co{set_run} \emph{before} its first plot. That caught one cell where the
+        call had landed after the plots and would have filed them under the
+        previous run's name.
+\end{itemize}
+
+\begin{openbox}[The live loops write one figure, not a movie]
+\file{Lockin_module.ipynb} Steps 4 and 4B redraw a single figure in place while
+the run proceeds. What reaches disk is that figure's \emph{final} state, which is
+the whole run --- not a frame per update. Step 4BN and Step 4S are headless and
+draw once at the end, so they are unaffected.
+
+There is also no \co{_fft.png} for the multipoint live cells: their time base is
+the host loop period, not a cadence, so an ASD computed on it would put a
+frequency scale on jitter. The streamed Step 5S has a real cadence and does
+produce one.
+\end{openbox}
 
 \section{The code, file by file}
 \label{sec:filemap}

@@ -1,0 +1,197 @@
+\chapter{Streaming the multipoint lock-in}
+\label{ch:mpstream}
+
+Everything so far has been the two-point method: one pair of parked frequencies on
+one flank pair, giving the field projection along a single NV axis. The multipoint
+notebook (\file{Modules/Lockin_module.ipynb}) parks 16 frequencies instead, which
+is what makes a full three-axis reconstruction possible --- and until 2026-08-17 it
+had only the slowest of the three acquisition paths.
+
+This chapter is what changes when \co{stream()} is pointed at it. Nothing in the
+FPGA program needs to change: \co{emission_order()}, \co{_fold_slots()} and
+\co{stream()} are all written in terms of $n_\text{slots}$, so 16 parked points
+work exactly as 2 do. What changes is the arithmetic, and one constraint that has
+never bound on the two-point path.
+
+\section{Why it is worth doing}
+
+\co{acquire()} costs \SI{8.5}{}--\SI{11.4}{\milli\second} of host round-trip
+whatever the program does (Ch.~\ref{ch:timing}), and Steps 4/4B/4BN call it once
+per sample. With 16 points and a reference the FPGA work is
+\SI{3.84}{\milli\second} --- comfortably \emph{under} the floor --- so the live
+loop is host-bound at
+
+\[
+\frac{1}{\max(\SI{10}{\milli\second},\ \SI{3.84}{\milli\second})}\approx\SI{26}{\hertz},
+\]
+
+\noindent and no FPGA setting moves it. \co{stream()} pays the host cost once for
+the whole run, so the rate becomes the cadence itself:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lccrrl@{}}
+\toprule
+\hd{Path} & \hd{slots} & \hd{reads/slot} & \hd{$t_\text{rep}$} & \hd{Rate} & \hd{Note} \\
+\midrule
+Step 4 / 4B / 4BN (live loop) & 16 & 2 & \SI{3.84}{\milli\second} & \SI{26}{\hertz} & host-bound, not FPGA-bound \\
+\textbf{Step 4S}, reference kept & 16 & 2 & \SI{3.84}{\milli\second} & \textbf{\SI{260}{\hertz}} & the default; reconstructable \\
+Step 4S, \co{skip_reference}     & 16 & 1 & \SI{1.92}{\milli\second} & \SI{521}{\hertz} & projections only --- see below \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A factor of ten, and it comes with the two structural properties from
+Ch.~\ref{sec:stream}: nothing is re-armed mid-run, so the replay race that costs
+burst mode half its batches cannot occur; and the samples are consecutive reps of
+one program, so the time axis is the cadence exactly.
+
+\begin{keybox}[The reference readout stays on, and that is not a rate compromise]
+It is tempting to set \co{multipoint_skip_reference = True} and double the rate,
+as the two-point path does. Do not, for any run you intend to reconstruct.
+
+The vector inversion consumes \co{peak_NN / peak_NN_ref} --- each parked point
+normalised by its own off-resonance reference. That division is what puts the
+values on the calibration's scale, because the calibration itself is built from
+\co{mw_on / median(mw_on)} inside \co{_load_operator_full_scan}. Feed it
+unnormalised counts and it returns field values around \num{1e5}\,\si{\micro\tesla},
+which is not a subtle failure but is an easy one to mistake for a geometry
+problem.
+
+The two-point path can skip the reference because it normalises against a stored
+constant from the calibration JSON instead (\S\ref{sec:asm}). The multipoint path
+has no equivalent.
+\end{keybox}
+
+\section{The constraint that actually binds: buffer headroom}
+\label{sec:mpheadroom}
+
+The board's accumulated buffer holds \co{avg_maxlen} entries, one per readout per
+rep, and the board worker raises if unread entries ever reach that. The budget is
+shared across \emph{every} readout in a shot, so what matters is
+
+\[
+\co{shots_that_fit} = \left\lfloor \frac{\co{avg_maxlen}}{n_\text{slots}\times n_\text{readouts per slot}} \right\rfloor .
+\]
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+\hd{Configuration} & \hd{reads/shot} & \hd{relative headroom} & \\
+\midrule
+two-point, skip reference \emph{(all data so far)} & 2  & $1\times$      & has never come close \\
+two-point, with reference                          & 4  & $1/2\times$    & \\
+16-point, skip reference                           & 16 & $1/8\times$    & \\
+\textbf{16-point, with reference (Step 4S)}        & 32 & $1/16\times$   & \textbf{check before every long run} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Sixteen times less room, and the stride the worker transfers in is 10\% of it, so
+the margin between ``fine'' and ``the run dies at 20 seconds'' is much narrower
+than anything the two-point path has explored. Step 4S calls
+\co{stream_headroom()} before starting and warns if fewer than four strides fit.
+
+\begin{openbox}[The headroom number has never actually been read on this rig]
+\co{stream_headroom()} was broken for the whole 2026-08-17 session --- it
+subscripted the Pyro proxy instead of \co{qd.soccfg} (\S\ref{sec:stride}) --- so
+every run printed ``could not read avg_maxlen'' and proceeded blind. It is fixed,
+but that means the first Step 4S run is also the first time this rig's
+\co{avg_maxlen} will be known. If it turns out to be tight, the levers in order of
+preference are: shorten $\tau$ (the buffer is counted in \emph{entries}, so this
+does not help --- it only makes the entries arrive faster, which is worse), reduce
+the parked-point count, or drop the reference and give up reconstruction.
+\end{openbox}
+
+\section{Why the reconstruction is not inline}
+\label{sec:mprecon}
+
+Step 4BN reconstructs the field vector inside its acquisition loop, once per
+batch. Step 4S does not, and the difference is not stylistic.
+
+At \SI{26}{\hertz} there is \SI{38}{\milli\second} between samples and the fit
+costs a few milliseconds; there is room. At \SI{260}{\hertz} there is
+\SI{3.84}{\milli\second} between samples and there is not. More importantly, the
+consequence of falling behind is different in kind: the live loop simply runs
+slower, because nothing is happening on the board between its \co{acquire()}
+calls. A stream has the tProc running continuously, so a consumer that cannot keep
+up lets unread shots accumulate in the buffer of \S\ref{sec:mpheadroom} until it
+overflows and \emph{the run dies}. Slow post-processing inside a stream loop is
+not a performance question, it is a correctness one.
+
+So Step 4S writes files and does nothing else, and Step 5S does the work
+afterwards, once, over the whole run --- through
+\co{nv_toolkit.tui._compute_live_snapshot}, the same entry point the existing
+offline reconstruction cell uses. Same calibration, same inversion, so a streamed
+run and a live run are directly comparable.
+
+\co{S5_DECIMATE} is there for the case where even the offline fit is too slow to
+be comfortable: it reconstructs every $N$th sample. Note that this is a genuine
+decimation, unlike the acquisition-side bin of \S\ref{sec:bin} --- it neither
+averages nor anti-aliases. Bin in Step 4S; decimate in Step 5S only to make a
+first look fast.
+
+\section{What the two cells produce}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lp{9.6cm}@{}}
+\toprule
+\hd{File} & \hd{Contents} \\
+\midrule
+\co{multipoint_lockin_stream_<stamp>.csv} &
+  One row per output sample: \co{packet}, \co{rep_index}, \co{reps_averaged},
+  \co{time_s}, \co{timestamp_epoch_s}, then \co{peak_NN}, \co{peak_NN_freq_mhz}
+  and \co{peak_NN_ref} for each parked point. \\[3pt]
+\co{..._wide.csv} &
+  \co{time_s} plus \co{peak_NN} normalised by its reference --- the format the
+  inversion consumes. Rebuilt by Step 5S rather than trusted, so a run copied in
+  from another machine works. \\[3pt]
+\co{..._projection_rows.csv} &
+  Per-block $\Delta f$ and new peak frequency. \\[3pt]
+\co{..._vector_rows.csv} &
+  $\Delta B_x$, $\Delta B_y$, $\Delta B_z$ per sample. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The naming matches the live-loop convention (\co{multipoint_lockin_live_*} and its
+\co{_wide} / \co{_vector_rows} / \co{_projection_rows} companions), so the existing
+post-processing and the session folders under \file{data/results/} stay consistent.
+
+\section{What Step 5S checks, and why each check exists}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lp{9.4cm}@{}}
+\toprule
+\hd{Check} & \hd{What a failure means} \\
+\midrule
+\co{rep_index} gaps & A dropped rep. Every timestamp \emph{after} the first gap is
+  wrong, because the axis is built by counting reps rather than by measuring time.
+  This is the one failure that silently corrupts the frequency scale of every
+  spectrum downstream. \\[3pt]
+duplicate \co{rep_index} & Would be the burst replay appearing where it should be
+  impossible. Has never been seen in a stream. \\[3pt]
+timestamp spacing & Should be identical to four decimal places. Spread here means
+  the same thing as a rep gap. \\[3pt]
+PL droop & A continuous run has no relaxation gap between batches, so the
+  common-mode level walks over the run --- $\sim$25\% over \SI{30}{\second} on the
+  two-point path. It is common to every parked point, which is what the reference
+  normalisation removes. \\[3pt]
+rank-deficient samples & A geometry problem with the parked plan, not a streaming
+  one: the same plan fails the same way in Step 4B. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{openbox}[Not yet run on hardware]
+Everything in this chapter is derived from the timing model and from
+\co{stream()}'s behaviour on the two-point path, which is well characterised. The
+multipoint streaming cells have been checked for syntax and for name resolution
+against the notebook's own globals, and nothing more. The first rig run should
+compare a Step 4S run against a Step 4BN run taken back to back: the reconstructed
+$\Delta B$ should agree within noise, and Step 4S should report ten times the rate
+with \co{reps_missing = 0}.
+\end{openbox}

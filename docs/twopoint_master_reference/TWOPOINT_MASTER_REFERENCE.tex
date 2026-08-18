@@ -19,7 +19,7 @@ open defects $\cdot$ work log\par}
 \raggedright
 \textbf{Project} \quad NV compact magnetometer, RFSoC4x2 + QICK-DAWG\\
 \textbf{Repository} \quad \file{nv_magnetometer_project}, branch \co{main}\\
-\textbf{Sessions covered} \quad 2026-08-04, 2026-08-06, 2026-08-14\\
+\textbf{Sessions covered} \quad 2026-08-04, 2026-08-06, 2026-08-14, 2026-08-17\\
 \textbf{Written} \quad 2026-08-17\\[0.7em]
 \textbf{Supersedes} \quad
 \file{docs/2026-08-06_twopoint_timing/TIMING_AND_NOISE_ANALYSIS.md} and
@@ -45,9 +45,15 @@ burst-mode noise floor went from 158 to \textbf{38\,\etaunit}. Burst is the best
 operating point available today.
 
 \textbf{Bandwidth.} Streaming delivers \textbf{1041.7\,Hz} with a gapless,
-duplicate-free rep axis --- the 1\,kHz target is met. Its noise floor is
-$\sim$6$\times$ the burst floor for reasons not yet identified, which is the single
-highest-value open item.
+duplicate-free rep axis --- the 1\,kHz target is met, on two machines. Its noise
+floor is above the burst floor by a flat factor across the band, but the size of
+that factor moved from $\sim$6$\times$ (2026-08-14) to \textbf{1.3--1.6$\times$}
+(2026-08-17) and is not yet pinned to a cause.
+
+\textbf{And one about how this document is used.} Chapter~\ref{ch:defects}
+\S\ref{sec:boundedpollretraction} records a fix that was reasoned from the source,
+verified against a mock, shipped, and broke two of the three acquisition methods
+two hours later. It is written up at length on purpose. The rig is the arbiter.
 \end{keybox}
 \end{minipage}
 
@@ -68,6 +74,7 @@ highest-value open item.
 \input{part4_timing}
 \input{part5_sensitivity}
 \input{part6_defects}
+\input{part8_multipoint_stream}
 \input{part7_worklog}
 
 \end{document}

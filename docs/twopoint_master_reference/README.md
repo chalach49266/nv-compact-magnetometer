@@ -47,4 +47,5 @@ Copy any updated figures into `figures/` here before rebuilding.
 | `part4_timing.tex` | 7 timing in full |
 | `part5_sensitivity.tex` | 8 sensitivity and noise |
 | `part6_defects.tex` | 9 open defects |
-| `part7_worklog.tex` | 10 work log · 11 to do · 12 corrections · 13 reproducing |
+| `part8_multipoint_stream.tex` | 10 streaming the multipoint lock-in |
+| `part7_worklog.tex` | 11 work log · 12 to do · 13 corrections · 14 reproducing |

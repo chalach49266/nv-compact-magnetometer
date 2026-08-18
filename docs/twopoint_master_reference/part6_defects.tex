@@ -129,6 +129,61 @@ band} (\file{tables/read_path.csv}):
 the ratio is constant across two and a half decades.}
 \end{figure}
 
+\subsection{2026-08-17: still there, but far smaller}
+\label{sec:streamnoise0817}
+
+The 2026-08-17 morning session gives an independent look at the same comparison,
+after the photodiode gain change and on a different computer. It is a weaker
+measurement than the 08-14 one --- the runs are ten minutes apart rather than
+interleaved, and the whole session was a magnet test with the magnet moved by
+hand --- so each run is quoted twice: over the full \SI{30}{\second}, and over
+the first \SI{5}{\second} before the magnet was brought in at all. From
+\file{tables/0817\_read\_paths.csv}, medians over 4 stream and 6 de-staled burst
+runs:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrcrrr@{}}
+\toprule
+& \multicolumn{3}{c}{\hd{full \SI{30}{\second}}} & & \multicolumn{3}{c}{\hd{first \SI{5}{\second}, magnet away}} \\
+\cmidrule{2-4}\cmidrule{6-8}
+\hd{Band} & \hd{Stream} & \hd{Burst} & \hd{Ratio} & & \hd{Stream} & \hd{Burst} & \hd{Ratio} \\
+\midrule
+10--30\,Hz   & 113.3 & 78.4 & 1.45 & & 127.6 & 95.9 & 1.33 \\
+100--200\,Hz & 105.5 & 77.2 & 1.37 & & 131.2 & 86.2 & 1.52 \\
+350--500\,Hz & 105.6 & 78.0 & 1.35 & & 137.3 & 87.8 & 1.56 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\emph{(\etaunit.)}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{figures/0817_read_paths.png}
+\caption{2026-08-17 morning. Points are individual runs, lines the median. The
+run-to-run scatter within each mode is a factor of $\sim$2, which is the main
+reason this session cannot replace the interleaved A/B.}
+\end{figure}
+
+\begin{keybox}[The excess is real but it is 1.3--1.6\texorpdfstring{$\times$}{x}, not 6\texorpdfstring{$\times$}{x}]
+Streaming is still worse than burst, still by a flat factor across the band ---
+the signature has not changed. But the size has: \textbf{1.3--1.6$\times$} here
+against \textbf{5.3--6.3$\times$} on 08-14. Both windows agree, so it is not the
+magnet.
+
+Three things differ between the sessions and none has been isolated: the
+photodiode gain change, \co{mw_gain} (this session ran at \num{10500}; the
+current notebook default is \num{15000}), and the \co{stream()} configuration
+sequence, which was aligned with \co{acquire()}'s on 2026-08-16 --- \emph{after}
+the 08-14 data and \emph{before} this session. That last one is the leading
+candidate precisely because it was the only difference in the read path, and
+this is the first data taken with it.
+
+Do not treat the 6$\times$ figure as current. Do not treat 1.4$\times$ as settled
+either: \co{profile\_twopoint\_acquire.py --compare-read-paths} interleaves the
+two modes on the same program and is still the measurement that closes this.
+\end{keybox}
+
 \subsection{What has been ruled out, with the measurement}
 
 \begin{center}
@@ -257,42 +312,107 @@ call & argument & result \\
 \end{tabular}
 \end{center}
 
-\subsection{The fix}
+\subsection{The first fix, and why it had to be withdrawn}
+\label{sec:boundedpollretraction}
 
-\begin{keybox}[title=\textbf{Three changes, all shipped}]
+\begin{retractbox}[title=\textbf{Bounding the poll broke two of the three methods. Do not reinstate it.}]
+The obvious fix --- pass a finite \co{timeout} so the block becomes a
+\co{queue.Empty} --- shipped on 2026-08-17 at 14:23 (commit \co{9832e07}) with
+\co{POLL\_TIMEOUT\_S = 1.0}. It was verified against a hand-written mock, never
+against the board. Two hours later, on the rig:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lllp{5.6cm}@{}}
+\toprule
+\hd{Step} & \hd{Mode} & \hd{reps} & \hd{Result} \\
+\midrule
+4A & averaged & 35   & worked, \SI{104.5}{\hertz} \\
+4B & burst    & 2000 & \co{TimeoutError: acquire() read 0 of 2000 shots and then
+                       saw nothing for 10.0 s} \\
+4C & stream   & 2000 & hung \emph{anyway}, in \co{Pyro4 socketutil.recvall} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both failures are at the same call --- the dedicated large-reps auto-zero acquire
+--- and 4A never makes one, which is why it survived.
+
+The reason a bounded poll is not a safe drop-in is in \co{poll\_data}'s body
+(\file{qick/qick.py}):
+
+\begin{center}
+\begin{minipage}{0.86\linewidth}\small
+\begin{verbatim}
+time_end = time.time() + totaltime
+while streamer.count < streamer.total_count and time.time() < time_end:
+    length, data = streamer.data_queue.get(block=True, timeout=timeout)
+    if streamer.stop_flag.is_set() or data is None:
+        break            # <-- the packet is DISCARDED, not counted
+    streamer.count += length
+    new_data.append((length, data))
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+With \co{timeout=None} the \co{get} blocks until a packet exists, so the RPC
+always makes forward progress and a slow first stride is simply a wait. With a
+finite timeout it returns \co{[]} instead, and the client loop turns that into a
+hard failure --- a transient board-side condition becomes a dead run. The
+\co{stop\_flag} branch makes it worse: it drops the packet it just took, so a
+bounded poll can consume data and report none.
+\end{retractbox}
+
+\subsection{What is actually shipped}
+
+\begin{keybox}[title=\textbf{Blocking poll, bounded cleanup, explicit recovery}]
 \begin{enumerate}
-  \item \textbf{Every poll is bounded.} \co{NVAveragerProgram.\_drain\_readout()}
-        (extracted from \co{acquire()}, so it is now testable on its own) and
-        \co{stream()} both pass an explicit \co{timeout}. A stalled readout raises
-        \co{TimeoutError} naming the shot count instead of hanging. This is also
-        what makes \co{stream()}'s \co{poll\_timeout\_s} parameter work --- it was
-        unreachable before, since the call it guards never returned.
-  \item \textbf{Interrupts clean up.} The drain loop catches \co{BaseException}
-        (so, \co{Ctrl-C} too) and \co{stream()} has a \co{finally}, which for a
-        generator also runs on \co{GeneratorExit} --- the \co{break}, the interrupt,
-        and garbage collection of a partly-consumed stream. Both call
-        \co{\_abort\_readout()}: stop the tProc, then stop the readout.
-  \item \textbf{An explicit recovery.} \co{MultipointLockinODMR.recover()} stops the
-        tProc, stops the readout, and calls \co{DataStreamer.start\_worker()}, which
-        installs fresh queues and flags so anything blocked on the old queue is
-        orphaned against an object nothing will ever write to again.
-        \co{ensure\_idle()} is the one-RPC pre-flight now at the top of Steps 4A, 4B
-        and 4C; it escalates to \co{recover()} only when the board is actually dirty,
-        because a full recover per run leaks a board-side worker thread.
+  \item \textbf{The poll blocks, as qick intends.} \co{POLL\_TIMEOUT\_S = None} is
+        the default in \co{NVAveragerProgram}, and both \co{\_drain\_readout()} and
+        \co{stream()} read it from there so the two paths cannot drift apart. Set
+        it to a float for a diagnostic run and the bounded behaviour --- including
+        \co{stream()}'s \co{poll\_timeout\_s} --- comes back.
+  \item \textbf{An empty return is an error, not a spin.} Under a blocking poll,
+        \co{[]} cannot mean ``the board is slow''; it means the readout ended, or
+        somebody else drained the queue. Both loops raise, naming how many shots
+        they got. The original code spun on the same condition, hammering the board
+        with RPCs; a naive fix would have short-read zeros into the tail of
+        \co{d\_buf} instead.
+  \item \textbf{Interrupts still clean up} --- this is the half of \co{9832e07}
+        worth keeping, and it works fine with a blocking poll, because Pyro raises
+        \co{KeyboardInterrupt} inside \co{sock.recv}. The drain loop catches
+        \co{BaseException} and \co{stream()} has a \co{finally}, which for a
+        generator also runs on \co{GeneratorExit}. Both call \co{\_abort\_readout()}:
+        stop the tProc, then stop the readout.
+  \item \textbf{Recovery is explicit and staged.} \co{recover()} first stops the
+        tProc, stops the readout and \emph{drains the data queue} --- the draining
+        is what keeps the next run from picking up leftovers, and it is enough
+        after an ordinary \co{Ctrl-C}. Only if the board is still not idle does it
+        escalate to \co{DataStreamer.start\_worker()}, which installs fresh queues
+        so anything blocked on the old one is orphaned, at the cost of leaking a
+        board-side thread. \co{recover(force=True)} goes straight there.
+  \item \textbf{\co{ensure\_idle()} reports; it does not act.} It used to call
+        \co{recover()} automatically when it found the board busy. Replacing the
+        streamer's queues implicitly, at the top of every acquisition cell,
+        possibly on a false positive from the probe, is a larger risk than the
+        condition it guards. It now prints and returns \co{False}, and Steps 4A/4B/4C
+        raise and point at Step 0.
 \end{enumerate}
 \end{keybox}
 
-\begin{openbox}[title=\textbf{Still open: does this explain the burst replay?}]
+\begin{openbox}[title=\textbf{Still open: does the wedge explain the burst replay? Probably not.}]
 Consequence 3 above is a mechanism by which one run's packet is delivered to a
-\emph{different} run's consumer. That is the first concrete candidate for
-\S\ref{sec:replay} since \co{reset\_tproc=True} was eliminated, and it fits the
-alternating short/long signature: a call that receives a packet meant for the
-previous run returns early with stale contents.
+\emph{different} run's consumer, which fits the alternating short/long signature.
 
-It is \textbf{not} established. The 2026-08-14 burst run was not obviously preceded
-by an interrupt, and a wedge should not recur once per two batches for 371 batches.
-Testable directly: run a burst with the fix in place and re-measure the stale
-fraction. If it drops from $\sim$50\% to zero, the two defects were one defect.
+The 2026-08-17 morning session argues against it. Those runs were taken on a
+second computer at commit \co{8fd303f} --- before any of this --- and their stale
+fraction is \textbf{50.0--50.8\% across six burst files}
+(\file{tables/0817\_burst\_audit.csv}), the same as 08-06 and 08-14. A wedge is an
+incident; it should not reproduce at exactly one batch in two, on two machines,
+across three sessions. Whatever causes the replay is structural.
+
+Still worth measuring, and free: run a burst now that the poll is blocking again
+and read \co{BURST\_STALE\_FRACTION}.
 \end{openbox}
 
 \section{Averaged and burst runs used to overwrite each other's filenames}

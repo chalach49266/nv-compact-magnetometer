@@ -1,0 +1,23 @@
+{
+  "odmr_csv": "/Users/ckasemtantikul/Library/CloudStorage/OneDrive-WashingtonUniversityinSt.Louis/Documents/PhD/NV Compact Magnetometer/nv_magnetometer_project/data/odmr_sweeps/odmr_sweep_20260818_145102.csv",
+  "orient": 1.0,
+  "f0_mhz": 2797.1642037809197,
+  "gamma_mhz": 3.6799592658093925,
+  "fwhm_mhz": 7.359918531618785,
+  "contrast": 0.07856032703361619,
+  "baseline_fit": 1.0071420467163992,
+  "rms_resid": 0.002854751538666128,
+  "fit_window_mhz": 41.999983978270386,
+  "f_minus_mhz": 2794.146086729241,
+  "f_plus_mhz": 2800.146084440423,
+  "baseline_minus": 0.9549463947882697,
+  "baseline_plus": 0.9549463947882677,
+  "slope_minus_per_mhz": -0.016029625941494367,
+  "slope_plus_per_mhz": 0.013497303224339964,
+  "placement_mode": "symmetric_max_slope",
+  "balance_offset_mhz": -0.018118196087925753,
+  "snr": 106.4049433495566,
+  "total_score": 0.9367032060291287,
+  "gamma_nv_mhz_per_uT": 0.028024,
+  "ref_norm_counts": 1868.180914356451
+}

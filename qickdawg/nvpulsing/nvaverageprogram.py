@@ -21,8 +21,8 @@ except ModuleNotFoundError:
 import operator
 import functools
 import inspect
-from time import perf_counter as _perf_counter
 import numpy as np
+from time import perf_counter as _perf_counter
 from typing import List, Optional
 from collections import defaultdict
 from itemattribute import ItemAttribute
@@ -161,117 +161,110 @@ class NVAveragerProgram(QickRegisterManagerMixin, AcquireProgram):
             sweep_pts.append(swp.get_sweep_pts())
         return sweep_pts
 
-    # --- Drain-loop bounds. -------------------------------------------------
-    #
-    # POLL_TOTALTIME_S  how long the board keeps gathering within one poll_data
-    #                   RPC once data starts arriving. qick's own default.
-    # POLL_TIMEOUT_S    how long the board waits for the *next* packet before
-    #                   giving up and returning what it has. qick defaults this
-    #                   to None, which means "block forever"; that is the wedge.
-    #                   It has to be comfortably longer than the board worker's
-    #                   transfer period (a stride is ~10% of the accumulated
-    #                   buffer) or a healthy run would time out early.
-    # ACQUIRE_IDLE_S    how long the client tolerates *zero* progress before
-    #                   declaring the tProc dead. Scaled by the expected run
-    #                   length so long bursts and streams are not cut short.
-    POLL_TOTALTIME_S = 0.1
-    POLL_TIMEOUT_S = 1.0
-    ACQUIRE_IDLE_S = 10.0
 
-    def _acquire_timeout_s(self, total_count):
-        """Seconds of no-progress to tolerate before giving up on a readout."""
-        expected = 0.0
-        try:
-            # Rough FPGA run length, when the subclass can estimate it.
-            expected = float(total_count) * float(self.time_per_rep())
-        except Exception:
-            pass
-        return max(self.ACQUIRE_IDLE_S, 2.0 * expected)
+    # ------------------------------------------------------------------ readout
+    # A bounded poll, on purpose.
+    #
+    # qick's poll_data(timeout=None) hands `None` to data_queue.get(block=True),
+    # so the RPC does not return until a packet exists. If the tProc is not
+    # producing -- program never started, an earlier cell left the board mid-run,
+    # a stale consumer is taking the packets -- the call blocks forever, and a
+    # Ctrl-C unblocks only THIS side. The board-side Pyro thread stays parked in
+    # data_queue.get() for the life of the daemon, and it is still a consumer, so
+    # it will eat the next run's first packet too. That state survives a kernel
+    # restart, and it is how one interrupted cell poisons every run after it.
+    #
+    # A bounded poll makes the RPC always return, so an interrupt can never leave
+    # a thread parked. An empty return is NOT treated as failure -- the loop just
+    # polls again. Failure is decided by whether the tProc shot counter is moving,
+    # which is the only thing that distinguishes the three ways this stalls.
+    POLL_TOTALTIME_S = 0.1
+    POLL_TIMEOUT_S = 0.5
+    STALL_GRACE_S = 5.0        # no counter movement AND no data for this long -> raise
 
     def _drain_readout(self, total_count, pbar):
-        """Read `total_count` shots out of the accumulated buffer into `self.d_buf`.
-
-        Assumes `start_readout` has already been issued. Returns the shot count,
-        which equals `total_count` on success.
-
-        Every wait here is bounded, which is the whole point of the method.
-        `poll_data()`'s own default is `timeout=None`, and its board-side body is
-        then `data_queue.get(block=True, timeout=None)`: if the tProc shot counter
-        never advances -- a program that did not start, a tProc left running by an
-        earlier cell, an abandoned `stream()` -- that `get` never returns, so the
-        RPC never replies and the client sits in `sock.recv(..., MSG_WAITALL)`.
-
-        Ctrl-C at that point unblocks only the client. The board-side Pyro thread
-        stays blocked on the queue for the life of the daemon, and it is still a
-        consumer, so the next run's first packet can be delivered to it instead of
-        to you. That state survives a notebook kernel restart, because it lives on
-        the board. `MultipointLockinODMR.recover()` is the way out.
-
-        Passing a finite timeout turns the block into a `queue.Empty` and a prompt
-        return, so a stalled readout raises `TimeoutError` here instead of hanging,
-        and an interrupt lands somewhere the `except` below can clean up after it.
-        """
+        """Read `total_count` shots into `self.d_buf`. Returns the shot count."""
         count = 0
-        idle_budget = self._acquire_timeout_s(total_count)
-        deadline = _perf_counter() + idle_budget
+        last_counter = -1
+        last_progress = _perf_counter()
+        # Allow for a genuinely long program before calling anything a stall.
+        try:
+            budget = max(self.STALL_GRACE_S, 3.0 * total_count * self.time_per_rep())
+        except Exception:
+            budget = self.STALL_GRACE_S
+
         try:
             while count < total_count:
-                new_data = obtain(qd.soc.poll_data(
-                    totaltime=self.POLL_TOTALTIME_S,
-                    timeout=self.POLL_TIMEOUT_S))
+                new_data = obtain(qd.soc.poll_data(totaltime=self.POLL_TOTALTIME_S,
+                                                   timeout=self.POLL_TIMEOUT_S))
                 if not new_data:
-                    if _perf_counter() > deadline:
-                        raise TimeoutError(
-                            "acquire() read %d of %d shots and then saw nothing for "
-                            "%.1f s. The tProc shot counter is not advancing: the "
-                            "program may not be running, or an earlier interrupted "
-                            "cell left the board wedged. Run "
-                            "MultipointLockinODMR.recover() and try again."
-                            % (count, total_count, idle_budget))
-                    continue
+                    try:
+                        now_counter = int(qd.soc.get_tproc_counter(addr=self.counter_addr))
+                    except Exception:
+                        now_counter = -1
+                    if now_counter != last_counter:
+                        # The program is running; we are simply ahead of it.
+                        last_counter = now_counter
+                        last_progress = _perf_counter()
+                        continue
+                    if _perf_counter() - last_progress < budget:
+                        continue
+                    if now_counter > 0:
+                        raise RuntimeError(
+                            "readout stalled after %d of %d shots. The tProc counter is "
+                            "at %d and not moving, but no data is arriving: a board-side "
+                            "thread left over from an interrupted cell is draining the "
+                            "queue instead of this one. Run the pre-flight cell (it calls "
+                            "qd.soc.streamer.start_worker(), which hands you a fresh "
+                            "queue), or restart the Pyro server on the board."
+                            % (count, total_count, now_counter))
+                    raise RuntimeError(
+                        "readout stalled after %d of %d shots with the tProc counter at "
+                        "0: the program never started. The tProc was probably left "
+                        "stopped by an earlier interrupted cell. Run the pre-flight cell "
+                        "and try again." % (count, total_count))
+
+                last_progress = _perf_counter()
                 for new_points, (d, s) in new_data:
-                    # print(new_points, (d, s))
+                    if count + new_points > total_count:
+                        # qick logs this and lets numpy raise "could not broadcast
+                        # input array from shape (X,2) into shape (Y,2)" one line
+                        # later, naming neither the cause nor the fix.
+                        raise RuntimeError(
+                            "readout returned %d shots into a %d-shot run (already had "
+                            "%d). The tProc shot counter did not start at zero, so the "
+                            "board handed back a previous run's buffer. acquire() clears "
+                            "it before every readout; if you reached this from a path "
+                            "that does not, that path needs the same call."
+                            % (new_points, total_count, count))
                     for ii, nreads in enumerate(self.reads_per_shot):
-                        # print(count, new_points, nreads, d[ii].shape, total_count)
                         if new_points * nreads != d[ii].shape[0]:
                             logger.error(
                                 "data size mismatch: new_points=%d, nreads=%d, data shape %s" %
                                 (new_points, nreads, d[ii].shape))
-                        if count + new_points > total_count:
-                            logger.error(
-                                "got too much data: count=%d, new_points=%d, total_count=%d" %
-                                (count, new_points, total_count))
                         # use reshape to view the d_buf array in a shape that matches the raw data
                         self.d_buf[ii].reshape((-1, 2))[count * nreads:(count + new_points) * nreads] = d[ii]
                     count += new_points
                     self.stats.append(s)
                     pbar.update(new_points)
-                # Progress was made, so restart the idle clock.
-                deadline = _perf_counter() + idle_budget
         except BaseException:
-            # BaseException so this also covers KeyboardInterrupt. Leave the board
-            # idle rather than mid-readout, so the next call starts from a known
-            # state instead of inheriting a running tProc and an undrained queue.
+            # BaseException so this covers KeyboardInterrupt. Leave the board idle
+            # rather than mid-readout: a running tProc keeps advancing the counter
+            # under a streamer nobody is draining, and the next run inherits both.
             self._abort_readout()
             raise
         return count
 
     def _abort_readout(self):
-        """Leave the board idle after a failed or interrupted readout.
-
-        Best-effort and never raises: it runs from an exception handler, where a
-        second exception would mask the first. Stopping the tProc keeps the shot
-        counter from advancing under a streamer that is no longer being drained;
-        stop_readout() breaks the board-side worker out of its transfer loop.
-        """
-        try:
-            qd.soc.stop_tproc()
-        except Exception as exc:
-            logger.warning("could not stop the tProc while aborting readout: %s", exc)
-        try:
-            qd.soc.streamer.stop_readout()
-        except Exception as exc:
-            logger.warning("could not stop the streamer while aborting readout: %s", exc)
+        """Best effort, never raises -- it runs from an exception handler."""
+        for label, fn in (("stop tProc", lambda: qd.soc.stop_tproc()),
+                          ("stop readout", lambda: qd.soc.streamer.stop_readout()),
+                          ("clear counter",
+                           lambda: qd.soc.clear_tproc_counter(addr=self.counter_addr))):
+            try:
+                fn()
+            except Exception as exc:
+                logger.warning("could not %s while aborting readout: %s", label, exc)
 
     def acquire(self, load_pulses=True, readouts_per_experiment: Optional[int] = None,
                 save_experiments: List = None, start_src: str = "internal",
@@ -390,10 +383,26 @@ class NVAveragerProgram(QickRegisterManagerMixin, AcquireProgram):
             # Reload data memory.
             qd.soc.reload_mem()
 
+            # Zero the tProc shot counter. qick's own AcquireProgram.start_round()
+            # does this one line after reload_mem() ("make sure count variable is
+            # reset to 0"); this vendored copy reproduced every other step of that
+            # sequence and dropped this one, on every revision.
+            #
+            # The counter is tProc data memory. The program only increments it,
+            # stop_tproc(lazy=True) is a no-op on tProc v1, and reload_mem() does
+            # not reach this address -- so without this line it carries the last
+            # run's value into the next one, and the board-side worker computes
+            # `newshots = counter - 0` on its FIRST look, before the new program has
+            # written anything. Leftover LARGER than this run is the
+            # "could not broadcast input array from shape (N,2) into shape (M,2)"
+            # crash; leftover EQUAL to it is a silent replay of the previous buffer.
+            qd.soc.clear_tproc_counter(addr=self.counter_addr)
+
+            count = 0
             with tqdm(total=total_count, disable=hidereps) as pbar:
                 qd.soc.start_readout(total_count, counter_addr=self.counter_addr,
                                      ch_list=list(self.ro_chs), reads_per_shot=self.reads_per_shot)
-                self._drain_readout(total_count, pbar)
+                count = self._drain_readout(total_count, pbar)
 
         return self.d_buf[0][..., 0]
         # return self.d_buf

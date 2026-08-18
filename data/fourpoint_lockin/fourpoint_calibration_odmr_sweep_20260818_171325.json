@@ -1,0 +1,59 @@
+{
+  "peaks": [
+    {
+      "odmr_csv": "/Users/ckasemtantikul/Library/CloudStorage/OneDrive-WashingtonUniversityinSt.Louis/Documents/PhD/NV Compact Magnetometer/nv_magnetometer_project/data/odmr_sweeps/odmr_sweep_20260818_171325.csv",
+      "orient": 1.0,
+      "f0_mhz": 2797.232768585552,
+      "gamma_mhz": 3.6726557456678934,
+      "fwhm_mhz": 7.345311491335787,
+      "contrast": 0.07996505611621925,
+      "baseline_fit": 1.0074705682258192,
+      "rms_resid": 0.002750633138000205,
+      "fit_window_mhz": 41.99998397827027,
+      "f_minus_mhz": 2793.722388411013,
+      "f_plus_mhz": 2800.722385740725,
+      "baseline_minus": 0.9626563724148013,
+      "baseline_plus": 0.9626563724148091,
+      "slope_minus_per_mhz": -0.01603843610736948,
+      "slope_plus_per_mhz": 0.0141085031176187,
+      "placement_mode": "symmetric_max_slope",
+      "balance_offset_mhz": -0.010381509683156764,
+      "snr": 89.2236686223021,
+      "total_score": 0.9443611760935693,
+      "gamma_nv_mhz_per_uT": 0.028024,
+      "ref_norm_counts": 1811.772527279396,
+      "parked_pair_index": 1
+    },
+    {
+      "odmr_csv": "/Users/ckasemtantikul/Library/CloudStorage/OneDrive-WashingtonUniversityinSt.Louis/Documents/PhD/NV Compact Magnetometer/nv_magnetometer_project/data/odmr_sweeps/odmr_sweep_20260818_171325.csv",
+      "orient": 1.0,
+      "f0_mhz": 2947.663056495268,
+      "gamma_mhz": 3.3047628262581807,
+      "fwhm_mhz": 6.6095256525163615,
+      "contrast": 0.07657820198847216,
+      "baseline_fit": 1.0033570797581965,
+      "rms_resid": 0.005938789125289083,
+      "fit_window_mhz": 41.73610229693859,
+      "f_minus_mhz": 2944.2248570655506,
+      "f_plus_mhz": 2951.2248543952624,
+      "baseline_minus": 0.9634797049338124,
+      "baseline_plus": 0.9634797049338062,
+      "slope_minus_per_mhz": -0.016127996703073237,
+      "slope_plus_per_mhz": 0.014346776382497747,
+      "placement_mode": "symmetric_max_slope",
+      "balance_offset_mhz": 0.06179923513855101,
+      "snr": 85.44467358318164,
+      "total_score": 0.902228809139953,
+      "gamma_nv_mhz_per_uT": 0.028024,
+      "ref_norm_counts": 1811.772527279396,
+      "parked_pair_index": 2
+    }
+  ],
+  "parked_frequencies_mhz": [
+    2793.722388411013,
+    2800.722385740725,
+    2944.2248570655506,
+    2951.2248543952624
+  ],
+  "gamma_nv_mhz_per_uT": 0.028024
+}

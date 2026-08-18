@@ -352,6 +352,117 @@ class TwoPointResult:
         row.update(self.spectrum.to_dict())
         return row
 
+    def spectrum_figure(self, path=None, show: bool = False, annotate: bool = True,
+                        fft_fmax_hz=None):
+        """Both spectra of the run, one above the other.
+
+        Top --- Welch amplitude spectral density, log-log, in nT/sqrt(Hz). Averaged
+        over segments, so the broadband floor is stable and this is the panel a
+        sensitivity is quoted from. A coherent line is smeared here, and its height
+        depends on the segment length rather than on the signal.
+
+        Bottom --- the plain single-sided FFT of the whole record, linear axes, in
+        nT. One bin per fs/N with nothing averaged, so a periodic component reads
+        its actual amplitude: a 60 Hz line at 500 nT is 500 nT tall. The broadband
+        floor here is hashy by construction -- a single periodogram has ~100%
+        scatter in every bin -- so do not read a noise floor off this panel.
+
+        Quote sensitivity from the top panel; identify and size a line on the
+        bottom one.
+
+        `fft_fmax_hz` limits the bottom panel's frequency axis (default: the whole
+        band up to Nyquist).
+        """
+        import matplotlib.pyplot as plt
+
+        sp = self.spectrum
+        fig, (ax, ax2) = plt.subplots(2, 1, figsize=(11, 7.4))
+        fig.set_label("fft")
+
+        # ------------------------------------------------ top: Welch ASD, log-log
+        if sp.f is None or sp.asd is None:
+            ax.text(0.5, 0.5, "no spectrum: the run was too short to transform",
+                    ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+        else:
+            ax.loglog(sp.f[1:], sp.asd[1:], lw=0.8, color="tab:purple")
+            if np.isfinite(sp.floor_nt_rthz):
+                ax.axhline(sp.floor_nt_rthz, color="0.35", ls="--", lw=1.1,
+                           label=f"white floor {sp.floor_nt_rthz:.1f} nT/rtHz "
+                                 f"({sp.floor_band_hz[0]:.0f}-{sp.floor_band_hz[1]:.0f} Hz)")
+            if np.isfinite(sp.eta_nt_rthz):
+                ax.axhline(sp.eta_nt_rthz, color="0.65", ls=":", lw=1.1,
+                           label=f"eta from sigma {sp.eta_nt_rthz:.1f} nT/rtHz")
+            if annotate:
+                for _, r in sp.lines.iterrows():
+                    if r["excess_over_floor"] > 2.0:
+                        ax.axvline(r["frequency_hz"], color="tab:red", ls=":", lw=0.8)
+                        ax.annotate(f"{r['frequency_hz']:.0f} Hz  "
+                                    f"{r['excess_over_floor']:.0f}x",
+                                    xy=(r["frequency_hz"], 0.03),
+                                    xycoords=("data", "axes fraction"),
+                                    fontsize=7, color="tab:red", ha="center",
+                                    va="bottom", rotation=90,
+                                    bbox=dict(fc="white", ec="none", alpha=0.7, pad=0.6))
+                for a in sp.aliases:
+                    ax.annotate(str(a), xy=(0.99, 0.02), xycoords="axes fraction",
+                                ha="right", va="bottom", fontsize=7, color="tab:red")
+            ax.set_xlim(sp.f[1], sp.f[-1])
+            ax.legend(fontsize=8, loc="upper right")
+        ax.set(xlabel="frequency (Hz)", ylabel="nT / sqrt(Hz)",
+               title=f"Amplitude spectral density (Welch) -- {self.mode}, "
+                     f"fs = {sp.fs_hz:.1f} Hz"
+                     + (" (per burst segment)" if self.mode == "burst" else ""))
+        ax.grid(alpha=0.3, which="both")
+
+        # -------------------------------------- bottom: plain FFT, linear axes
+        f2, a2 = sp.fft_f, sp.fft_amp_nt
+        if f2 is None or a2 is None or len(f2) < 2:
+            why = ("burst records are not contiguous, so a transform across the "
+                   "whole run would put a frequency scale on the inter-burst gaps"
+                   if self.mode == "burst" else "the run was too short to transform")
+            ax2.text(0.5, 0.5, f"no plain FFT: {why}", ha="center", va="center",
+                     transform=ax2.transAxes, fontsize=9, wrap=True)
+            ax2.set_axis_off()
+        else:
+            fmax = float(fft_fmax_hz) if fft_fmax_hz else float(f2[-1])
+            keep = (f2 > 0) & (f2 <= fmax)
+            ax2.plot(f2[keep], a2[keep], lw=0.6, color="tab:blue")
+            if annotate and keep.any():
+                # Label the tallest few bins -- this panel is amplitude-correct,
+                # so the number beside each peak is the size of that component.
+                amp = a2[keep]
+                freq = f2[keep]
+                order = np.argsort(amp)[::-1]
+                picked = []
+                for j in order:
+                    if len(picked) >= 4:
+                        break
+                    # one label per line, not per bin of the same line
+                    if all(abs(freq[j] - freq[k]) > 0.02 * fmax for k in picked):
+                        picked.append(j)
+                for j in picked:
+                    ax2.annotate(f"{freq[j]:.1f} Hz\n{amp[j]:.0f} nT",
+                                 xy=(freq[j], amp[j]), xytext=(0, 6),
+                                 textcoords="offset points", ha="center",
+                                 fontsize=7, color="tab:red")
+                ax2.set_ylim(0, float(amp.max()) * 1.35)
+            ax2.set_xlim(0, fmax)
+        ax2.set(xlabel="frequency (Hz)", ylabel="amplitude (nT)",
+                title="Plain FFT of the whole record -- amplitude, not density; "
+                      "read line sizes here, not the noise floor")
+        ax2.grid(alpha=0.3)
+
+        fig.suptitle(Path(self.source).name if self.source else self.mode, y=1.0)
+        fig.tight_layout()
+        if path is not None:
+            fig.savefig(path, dpi=130, bbox_inches="tight")
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+        return fig
+
     def figure(self, path=None, show: bool = False):
         """Three panels: cleaned shift, the two z channels, and the ASD."""
         import matplotlib
@@ -360,6 +471,7 @@ class TwoPointResult:
         import matplotlib.pyplot as plt
 
         fig, axes = plt.subplots(3, 1, figsize=(13, 9))
+        fig.set_label("result")          # figure_autosave names the PNG from this
         raw, cln = self.raw, self.clean
 
         ax = axes[0]
@@ -724,10 +836,25 @@ _PIPELINES = {"averaged": process_averaged, "burst": process_burst,
 def process(csv_or_df, mode: Optional[str] = None, **kwargs) -> TwoPointResult:
     """Load a two-point CSV (or take a frame), detect the mode, and process it."""
     source = None
+    if csv_or_df is None:
+        # The notebook's Step 5x cells pass `<MODE>_LAST_CSV`, which is None when
+        # the matching Step 4x cell never got as far as writing a file. Without
+        # this the failure surfaced from inside pathlib as
+        # "TypeError: argument should be a str or an os.PathLike object where
+        # __fspath__ returns a str, not 'NoneType'", which says nothing about
+        # what to do -- see the 2026-08-17 session, where Step 5B reported that
+        # instead of "the burst run you are trying to analyse never finished".
+        raise ValueError(
+            "process() was given no run to analyse (csv_or_df is None). The "
+            "acquisition cell that should have produced it did not finish, so "
+            "there is no CSV. Re-run the Step 4 cell for this mode, or pass an "
+            "explicit path to an older run.")
     if isinstance(csv_or_df, pd.DataFrame):
         df = csv_or_df
     else:
         source = Path(csv_or_df)
+        if not source.exists():
+            raise FileNotFoundError(f"no such two-point run: {source}")
         df = pd.read_csv(source)
     mode = mode or detect_mode(df)
     if mode not in _PIPELINES:
