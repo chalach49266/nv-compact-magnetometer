@@ -27,6 +27,7 @@ Usage
     res = process("data/twopoint_lockin/twopoint_lockin_stream_20260814_145442.csv")
     print(res.describe())
     res.figure("out.png")
+    res.lowpass_figure(fc_hz=3.0, show=True)   # slow-signal view, kHz + nT axes
 
 or from a shell:
 
@@ -314,6 +315,111 @@ def detrend_series(values: np.ndarray, window: int) -> np.ndarray:
     return (s - baseline + s.mean()).to_numpy()
 
 
+def lowpass_by_segment(values: np.ndarray, segments: np.ndarray, time_s: np.ndarray,
+                       fs: float, fc_hz: float = 3.0, order: int = 4):
+    """Zero-phase low-pass applied within each segment, never across a gap.
+
+    Returns `(filtered, means, info)`.
+
+    `filtered` is NaN wherever the filter could not be run. `means` is the
+    per-segment mean and its mid-time, which is what a low-pass reduces to when
+    the segment is shorter than the filter's time constant -- the burst case,
+    where a 120 ms record cannot carry a 333 ms period. `info["mode"]` says which
+    of the two the caller got: `"filtered"`, `"segment_means"`, or `"none"`.
+
+    Filtering across a burst gap would be worse than useless: the samples on
+    either side are separated by dead time the instrument never measured, so any
+    frequency read across the join is an artefact of the duty cycle.
+    """
+    # sos, not (b, a): a 4th-order Butterworth at fc/(fs/2) = 0.0014 (3 Hz on a 4166.7 Hz
+    # stream) puts four poles almost on z = 1, where the transfer-function form loses
+    # precision. On the runs checked here the two agree exactly, but the margin shrinks
+    # with every factor of rate, and `lockin_extensions` already uses sos for this reason.
+    from scipy.signal import butter, sosfiltfilt
+
+    values = np.asarray(values, dtype=float)
+    time_s = np.asarray(time_s, dtype=float)
+    segments = (np.zeros(len(values)) if segments is None
+                else np.asarray(segments))
+    filtered = np.full(values.shape, np.nan)
+    means = {"t": np.array([]), "y": np.array([])}
+    # `interior` marks the samples that are past the filter's settling at both ends
+    # of their own segment. Zero-phase filtering pads the edges, and on a noisy trace
+    # that padding produces a transient several times the settled amplitude -- large
+    # enough to dominate a standard deviation or a peak-to-peak if it is included.
+    # The transient is still drawn; it is only excluded from the numbers.
+    info = {"mode": "none", "fs_hz": float(fs), "fc_hz": float(fc_hz),
+            "n_segments": int(len(np.unique(segments))), "note": "",
+            "segment_duration_s": float("nan"),
+            "interior": np.zeros(values.shape, dtype=bool)}
+
+    if not np.isfinite(fs) or fs <= 0 or not fc_hz:
+        info["note"] = "no usable sample rate"
+        return filtered, means, info
+    if fc_hz >= 0.45 * fs:
+        info["note"] = (f"{fc_hz:g} Hz is not below 0.45 x fs = {0.45*fs:.1f} Hz; "
+                        f"nothing to filter")
+        return filtered, means, info
+
+    groups = [np.flatnonzero(segments == s) for s in np.unique(segments)]
+    durations = np.array([time_s[g[-1]] - time_s[g[0]] if len(g) > 1 else 0.0
+                          for g in groups], dtype=float)
+    info["segment_duration_s"] = float(np.median(durations))
+
+    # A low-pass inside a record shorter than ~2/fc is that record's mean, and
+    # drawing it as a filtered line would imply a resolution the burst cannot
+    # carry. Report the means instead and say so.
+    if np.median(durations) * fc_hz < 2.0:
+        t_mid = np.array([0.5 * (time_s[g[0]] + time_s[g[-1]]) for g in groups])
+        y_mid = np.array([np.nanmean(values[g]) for g in groups])
+        order_idx = np.argsort(t_mid)
+        means = {"t": t_mid[order_idx], "y": y_mid[order_idx]}
+        info["mode"] = "segment_means"
+        info["note"] = (f"segments are {np.median(durations)*1e3:.0f} ms, shorter than "
+                        f"the {1/fc_hz*1e3:.0f} ms period of a {fc_hz:g} Hz filter, so a "
+                        f"low-pass inside one IS its mean. Points are per-segment means; "
+                        f"filtering across the dead time between bursts would put a "
+                        f"frequency scale on time that was never measured.")
+        return filtered, means, info
+
+    padlen = 3 * (2 * order + 1)
+    sos = butter(order, fc_hz / (fs / 2.0), btype="low", output="sos")
+    n_done = n_skipped = 0
+    for g in groups:
+        col = values[g]
+        if len(col) <= padlen + 1:
+            n_skipped += 1
+            continue
+        bad = ~np.isfinite(col)
+        if bad.all() or (~bad).sum() < 2:
+            n_skipped += 1
+            continue
+        if bad.any():
+            idx = np.arange(col.size)
+            col = col.copy()
+            col[bad] = np.interp(idx[bad], idx[~bad], col[~bad])
+        filtered[g] = sosfiltfilt(sos, col)
+        edge = int(np.ceil(fs / fc_hz))
+        if len(g) > 2 * edge + 2:
+            info["interior"][g[edge:-edge]] = True
+        else:
+            info["interior"][g] = True
+        n_done += 1
+
+    if n_done == 0:
+        info["note"] = (f"every segment is shorter than the {padlen + 2} samples "
+                        f"filtfilt needs at order {order}")
+        return filtered, means, info
+
+    info["mode"] = "filtered"
+    note = (f"zero phase, so the first and last ~{1/fc_hz:.2f} s of each filtered "
+            f"span are the filter settling rather than signal")
+    if n_skipped:
+        note += f"; {n_skipped} segment(s) too short to filter and left blank"
+    info["note"] = note
+    return filtered, means, info
+
+
 # --------------------------------------------------------------------------- #
 # Result container
 # --------------------------------------------------------------------------- #
@@ -353,7 +459,7 @@ class TwoPointResult:
         return row
 
     def spectrum_figure(self, path=None, show: bool = False, annotate: bool = True,
-                        fft_fmax_hz=None):
+                        fft_fmax_hz=None, fft_label_fmin_hz: float = 1.0):
         """Both spectra of the run, one above the other.
 
         Top --- Welch amplitude spectral density, log-log, in nT/sqrt(Hz). Averaged
@@ -361,17 +467,23 @@ class TwoPointResult:
         sensitivity is quoted from. A coherent line is smeared here, and its height
         depends on the segment length rather than on the signal.
 
-        Bottom --- the plain single-sided FFT of the whole record, linear axes, in
-        nT. One bin per fs/N with nothing averaged, so a periodic component reads
-        its actual amplitude: a 60 Hz line at 500 nT is 500 nT tall. The broadband
-        floor here is hashy by construction -- a single periodogram has ~100%
-        scatter in every bin -- so do not read a noise floor off this panel.
+        Bottom --- the plain single-sided FFT, linear axes, in nT. One bin per fs/N
+        with nothing averaged, so a periodic component reads its actual amplitude:
+        a 60 Hz line at 500 nT is 500 nT tall. The broadband floor here is hashy by
+        construction -- a single periodogram has ~100% scatter in every bin -- so
+        do not read a noise floor off this panel.
+
+        For burst runs there is no single contiguous record to transform, so this
+        panel shows whichever well-defined substitute `fft_mode` selected (default
+        one transform per burst); the panel titles itself with which one it is.
 
         Quote sensitivity from the top panel; identify and size a line on the
         bottom one.
 
         `fft_fmax_hz` limits the bottom panel's frequency axis (default: the whole
-        band up to Nyquist).
+        band up to Nyquist). `fft_label_fmin_hz` is the lowest frequency eligible
+        for a peak label -- everything is still drawn, but drift against DC does
+        not get to use up all four labels.
         """
         import matplotlib.pyplot as plt
 
@@ -418,9 +530,8 @@ class TwoPointResult:
         # -------------------------------------- bottom: plain FFT, linear axes
         f2, a2 = sp.fft_f, sp.fft_amp_nt
         if f2 is None or a2 is None or len(f2) < 2:
-            why = ("burst records are not contiguous, so a transform across the "
-                   "whole run would put a frequency scale on the inter-burst gaps"
-                   if self.mode == "burst" else "the run was too short to transform")
+            why = ("fft_mode='none' was asked for" if sp.fft_kind == "none"
+                   else sp.fft_note or "the run was too short to transform")
             ax2.text(0.5, 0.5, f"no plain FFT: {why}", ha="center", va="center",
                      transform=ax2.transAxes, fontsize=9, wrap=True)
             ax2.set_axis_off()
@@ -428,11 +539,16 @@ class TwoPointResult:
             fmax = float(fft_fmax_hz) if fft_fmax_hz else float(f2[-1])
             keep = (f2 > 0) & (f2 <= fmax)
             ax2.plot(f2[keep], a2[keep], lw=0.6, color="tab:blue")
-            if annotate and keep.any():
+            # Everything is still plotted; only the labels skip the first bins.
+            # Residual drift always piles up against DC, and with the gap-filled
+            # burst transform (~0.1 Hz bins) it would otherwise take every label
+            # and leave the real lines unmarked.
+            label = keep & (f2 >= max(float(fft_label_fmin_hz), float(f2[1])))
+            if annotate and label.any():
                 # Label the tallest few bins -- this panel is amplitude-correct,
                 # so the number beside each peak is the size of that component.
-                amp = a2[keep]
-                freq = f2[keep]
+                amp = a2[label]
+                freq = f2[label]
                 order = np.argsort(amp)[::-1]
                 picked = []
                 for j in order:
@@ -446,11 +562,20 @@ class TwoPointResult:
                                  xy=(freq[j], amp[j]), xytext=(0, 6),
                                  textcoords="offset points", ha="center",
                                  fontsize=7, color="tab:red")
-                ax2.set_ylim(0, float(amp.max()) * 1.35)
+                ax2.set_ylim(0, float(a2[keep].max()) * 1.1)
             ax2.set_xlim(0, fmax)
+        _t2 = {
+            "record": "Plain FFT of the whole record",
+            "per-burst": "Plain FFT, one transform per burst then combined",
+            "gap-filled": "Plain FFT on the true time axis, gaps left empty",
+            "concatenated": "Plain FFT with the burst gaps closed up "
+                            "-- FREQUENCIES ARE WRONG, diagnostic only",
+        }.get(sp.fft_kind, "Plain FFT")
         ax2.set(xlabel="frequency (Hz)", ylabel="amplitude (nT)",
-                title="Plain FFT of the whole record -- amplitude, not density; "
-                      "read line sizes here, not the noise floor")
+                title=f"{_t2} -- amplitude, not density; read line sizes here, "
+                      f"not the noise floor"
+                      + (f"\n{sp.fft_note}" if sp.fft_note else ""))
+        ax2.title.set_fontsize(9)
         ax2.grid(alpha=0.3)
 
         fig.suptitle(Path(self.source).name if self.source else self.mode, y=1.0)
@@ -529,14 +654,195 @@ class TwoPointResult:
         return fig
 
 
+    def lowpass_figure(self, fc_hz: float = 3.0, order: int = 4, path=None,
+                       show: bool = False, nt_per_khz: Optional[float] = None,
+                       field_label: Optional[str] = None, title_suffix: str = "",
+                       source: str = "auto"):
+        """The cleaned peak shift low-passed at `fc_hz`: kHz left, field right.
+
+        One panel on purpose. It is the slow-signal view the drone deck plots --
+        raw as the shadow, the zero-phase Butterworth over it -- and the right
+        axis carries the same numbers as field, so the plot can be read either
+        way without a second figure.
+
+        `fc_hz = 3` because hand-carried or slow-moving sources live below about
+        2.3 Hz while the mains line and the white floor do not, so the cut keeps
+        the signal and removes nearly all the noise power.
+
+        The filter runs WITHIN segments, never across one. That matters for
+        burst runs: the record is a train of ~120 ms bursts separated by dead
+        time, and filtering across the gap would put a frequency scale on time
+        the instrument never measured. When a segment is shorter than the
+        filter's own time constant (`duration * fc < 2`, which every burst is),
+        a low-pass inside it *is* its mean, so the segment means are drawn as
+        points instead -- the honest version of the same picture.
+
+        Parameters
+        ----------
+        nt_per_khz : float, optional
+            Field per kHz of shift for the right-hand axis. Defaults to one NV
+            axis, `1/gamma`. The four-point DIFFERENCE channel moves at
+            `2*gamma`, so pass `spec.khz_to_nt(1.0) / 2` for it.
+        source : {"auto", "clean", "predetrend"}
+            Which series to filter. "auto" (the default) filters the series from
+            BEFORE the detrend whenever the detrend's own corner is not well below
+            `fc_hz` -- otherwise the two filters fight and this plot shows the
+            residue rather than the signal. Stream mode detrends at ~fs/501, which
+            is 4.2 Hz at 2083 Hz and 8.3 Hz at 4166.7 Hz, both ABOVE a 3 Hz
+            low-pass. Measured on fourpoint_lockin_stream_20260820_164842, peak 1:
+            filtering after the detrend gives 14.8 kHz sigma against 67.3 kHz
+            before it, correlation 0.43, and cuts the 0-0.5 Hz content from
+            36.5 kHz rms to 5.1. The live display (Step 4CL) filters the
+            undetrended shift, which is why a 5C plot and a 4CL plot of the same
+            run disagreed until this default changed.
+        """
+        import matplotlib
+        if not show:
+            matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        cln = self.clean
+        t = cln["time_s"].to_numpy(float)
+        corner = float(self.report.get("detrend_corner_hz", 0.0) or 0.0)
+        has_pre = "peak_shift_kHz_predetrend" in cln.columns
+        if source == "auto":
+            use_pre = has_pre and corner > 0.3 * float(fc_hz)
+        elif source == "predetrend":
+            use_pre = has_pre
+        elif source == "clean":
+            use_pre = False
+        else:
+            raise ValueError(f"source must be auto/clean/predetrend, got {source!r}")
+        col = "peak_shift_kHz_predetrend" if use_pre else "peak_shift_kHz"
+        y = cln[col].to_numpy(float)
+        seg = (cln["segment"].to_numpy() if "segment" in cln.columns
+               else np.zeros(len(cln)))
+        fs = float(getattr(self.spectrum, "fs_hz", np.nan))
+        if not np.isfinite(fs) or fs <= 0:
+            fs = float(self.report.get("rate_hz", np.nan))
+        if (not np.isfinite(fs) or fs <= 0) and len(t) > 2:
+            fs = 1.0 / float(np.median(np.diff(t)))
+
+        filtered, means, info = lowpass_by_segment(y, seg, t, fs, fc_hz, order=order)
+        if nt_per_khz is None:
+            nt_per_khz = float(spec.khz_to_nt(1.0))
+        if field_label is None:
+            field_label = "equivalent field (nT)"
+
+        # Drone-deck style: the raw trace is the shadow, in the same colour at low
+        # alpha, and the filtered trace is the line on top of it.
+        colour = "crimson"
+        fig, ax = plt.subplots(figsize=(13, 4.2))
+        fig.set_label("lowpass")         # -> <stem>_lowpass.png
+        ax.plot(t, y, lw=0.4, color=colour, alpha=0.20, rasterized=len(y) > 20000,
+                label="raw (shadow)" + (", pre-detrend" if use_pre else ""))
+        if info["mode"] == "filtered":
+            for s in np.unique(seg):
+                m = seg == s
+                if np.isfinite(filtered[m]).any():
+                    ax.plot(t[m], filtered[m], lw=1.5, color=colour)
+            ax.plot([], [], lw=1.5, color=colour,
+                    label=f"{fc_hz:g} Hz low-pass (order {order}, zero phase)")
+        elif info["mode"] == "segment_means":
+            ax.plot(means["t"], means["y"], "o-", ms=4, lw=1.5, color=colour,
+                    label=f"per-segment mean ({info['n_segments']} segments of "
+                          f"{info['segment_duration_s']*1e3:.0f} ms)")
+        else:
+            ax.plot([], [], lw=1.5, color=colour, label="(low-pass not applicable)")
+        ax.axhline(0.0, color="0.4", lw=0.7)
+
+        # Same numbers as field, on the right. A secondary axis rather than a twin,
+        # so it stays locked to the left one through any autoscale or zoom.
+        sec = ax.secondary_yaxis("right",
+                                 functions=(lambda k: k * nt_per_khz,
+                                            lambda n: n / nt_per_khz))
+        sec.set_ylabel(field_label)
+
+        settled = (filtered[info["interior"]] if info["mode"] == "filtered"
+                   else np.array([]))
+        sigma_raw = float(np.nanstd(y))
+        bits = [f"sigma raw {sigma_raw:.3f} kHz ({sigma_raw * nt_per_khz:.1f} nT)"]
+        if info["mode"] == "filtered":
+            # Settled samples only: the edge transient is a filter artefact and would
+            # otherwise set the peak-to-peak all by itself.
+            sigma_lp = float(np.nanstd(settled))
+            p2p = float(np.nanmax(settled) - np.nanmin(settled))
+            bits.append(f"{fc_hz:g} Hz sigma {sigma_lp:.3f} kHz "
+                        f"({sigma_lp * nt_per_khz:.1f} nT)")
+            bits.append(f"p2p {p2p * nt_per_khz:.1f} nT")
+        elif info["mode"] == "segment_means":
+            sigma_lp = float(np.nanstd(means["y"]))
+            bits.append(f"segment-mean sigma {sigma_lp:.3f} kHz "
+                        f"({sigma_lp * nt_per_khz:.1f} nT)")
+        # Y range: the deck's rule first -- the raw band at its 99.5th percentile,
+        # so the outlier tails clip but the noise the filter is fighting is visible
+        # around the line. Where the raw is enormously wider than the filtered trace
+        # (the streaming case: 173 kHz against 11 kHz) that rule leaves the line
+        # flat on the axis and showing nothing, so there the range comes from the
+        # filtered trace and the shadow simply runs off the top and bottom -- which
+        # is what a shadow is for.
+        slow = (settled if info["mode"] == "filtered" else
+                means["y"] if info["mode"] == "segment_means" else None)
+        clipped = False
+        centre = float(np.nanmedian(y))
+        raw_half = 1.06 * float(np.nanpercentile(np.abs(y - centre), 99.5))
+        if slow is not None and np.isfinite(slow).any():
+            lo, hi = float(np.nanmin(slow)), float(np.nanmax(slow))
+            pad = max(0.15 * (hi - lo), 2.0 * float(np.nanstd(slow)), 1e-9)
+            if (hi - lo + 2 * pad) < 0.25 * (2 * raw_half):
+                ax.set_ylim(lo - pad, hi + pad)
+                clipped = True
+            else:
+                ax.set_ylim(min(centre - raw_half, lo - pad),
+                            max(centre + raw_half, hi + pad))
+        elif np.isfinite(raw_half) and raw_half > 0:
+            ax.set_ylim(centre - raw_half, centre + raw_half)
+        ax.set_xlim(float(np.nanmin(t)), float(np.nanmax(t)))
+
+        ax.set(xlabel="time (s)", ylabel="peak shift (kHz)",
+               title=f"{self.mode} -- {fc_hz:g} Hz low-pass{title_suffix}   |   "
+                     + "   |   ".join(bits))
+        ax.legend(fontsize=8, loc="upper right")
+        ax.grid(alpha=0.3)
+        if use_pre:
+            info["note"] = ((info["note"].rstrip(". ") + "; ") if info["note"] else "") + (
+                f"filtered BEFORE the detrend -- its rolling median is a high-pass at "
+                f"~{corner:.1f} Hz, above this {fc_hz:g} Hz low-pass, so filtering after "
+                f"it would remove the band this plot exists to show. describe() and the "
+                f"spectrum still use the detrended series")
+        elif has_pre:
+            info["note"] = ((info["note"].rstrip(". ") + "; ") if info["note"] else "") + (
+                f"filtered after the detrend (corner ~{corner:.2f} Hz, well below "
+                f"{fc_hz:g} Hz, so the two do not overlap)")
+        info["note"] = ((info["note"].rstrip(". ") + "; ") if info["note"] else "") + (
+            "y scaled to the filtered trace -- the raw shadow is wider than the axis "
+            "and is clipped, not missing" if clipped else
+            "y scaled to the raw band at its 99.5th percentile, so only the outlier "
+            "tails clip")
+        if info["note"]:
+            ax.text(0.005, -0.30, info["note"], transform=ax.transAxes, fontsize=7.5,
+                    color="0.35", va="top", wrap=True)
+
+        fig.suptitle(Path(self.source).name if self.source else self.mode, y=1.02)
+        fig.tight_layout()
+        if path is not None:
+            fig.savefig(path, dpi=130, bbox_inches="tight")
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+        return fig
+
+
 # --------------------------------------------------------------------------- #
 # Pipelines
 # --------------------------------------------------------------------------- #
 
 def _finish(mode, raw, clean, report, notes, fs, segment=None, source=None,
-            floor_band=None) -> TwoPointResult:
+            floor_band=None, burst_fft="gapfill", time_s=None) -> TwoPointResult:
     summary = spec.summarise(clean["peak_shift_kHz"].to_numpy(float), fs,
-                             segment=segment, floor_band=floor_band)
+                             segment=segment, floor_band=floor_band,
+                             burst_fft=burst_fft, time_s=time_s)
     return TwoPointResult(mode=mode, raw=raw, clean=clean, report=report,
                           spectrum=summary, notes=notes, source=source)
 
@@ -627,8 +933,16 @@ def process_averaged(df: pd.DataFrame, *, despike="shift", detrend: bool = False
     clean = _apply_despike(clean, raw, despike, report, notes, **despike_kwargs)
 
     if detrend:
+        # Keep the pre-detrend series. The detrend is a rolling-median HIGH-pass at
+        # ~fs/window, and at the streaming defaults (501 samples at 2083-4167 Hz) that
+        # corner is 4-8 Hz -- ABOVE the 3 Hz low-pass `lowpass_figure` draws. Filtering
+        # the detrended series would remove the band that plot exists to show: measured
+        # on fourpoint_lockin_stream_20260820_164842, 14.8 kHz sigma against 67.3 kHz,
+        # correlation 0.43, with the 0-0.5 Hz content cut from 36.5 to 5.1 kHz rms.
+        clean["peak_shift_kHz_predetrend"] = clean["peak_shift_kHz"].to_numpy()
         clean["peak_shift_kHz"] = detrend_series(clean["peak_shift_kHz"].to_numpy(),
                                                  detrend_window)
+        report["detrend_corner_hz"] = float(fs / detrend_window)
     if notch_mains:
         clean["peak_shift_kHz"] = spec.notch(clean["peak_shift_kHz"].to_numpy(),
                                              fs, [spec.MAINS_HZ * k for k in (1, 2, 3)])
@@ -640,13 +954,19 @@ def process_averaged(df: pd.DataFrame, *, despike="shift", detrend: bool = False
 
 def process_burst(df: pd.DataFrame, *, drop_stale: bool = True,
                   drop_first_sample: bool = True, despike="shift",
-                  notch_mains: bool = False, source=None,
-                  **despike_kwargs) -> TwoPointResult:
+                  notch_mains: bool = False, fft_mode: str = "gapfill",
+                  source=None, **despike_kwargs) -> TwoPointResult:
     """Burst mode: repair the replay, the row-0 transient and the time axis.
 
     Order matters. Staleness is judged on the *unfiltered* frame, because the
     batch table reconstructs each batch's start time from its first row; dropping
     row 0 first would shift every start by half a sample.
+
+    `fft_mode` chooses how the plain-FFT panel is built, since a burst record has
+    no single contiguous transform: "gapfill" (default, true time axis with the
+    dead time left as zeros), "segments" (one FFT per burst, artefact-free but
+    coarse), "concat" (naive, gaps closed up -- diagnostic only) or "none".
+    See `twopoint_spectra.summarise`.
     """
     raw = df.copy()
     notes: list[str] = []
@@ -739,7 +1059,9 @@ def process_burst(df: pd.DataFrame, *, drop_stale: bool = True,
                      f"gives {fs / clean.groupby('segment').size().min():.1f} Hz bins, "
                      f"so the notch is wide")
     return _finish("burst", raw, clean, report, notes, fs,
-                   segment=clean["segment"].to_numpy(), source=source)
+                   segment=clean["segment"].to_numpy(), source=source,
+                   burst_fft=fft_mode,
+                   time_s=clean["time_s"].to_numpy(float))
 
 
 def process_stream(df: pd.DataFrame, *, despike="shift", detrend: bool = True,
@@ -814,8 +1136,16 @@ def process_stream(df: pd.DataFrame, *, despike="shift", detrend: bool = True,
     clean = _apply_despike(clean, raw, despike, report, notes, **despike_kwargs)
 
     if detrend:
+        # Keep the pre-detrend series. The detrend is a rolling-median HIGH-pass at
+        # ~fs/window, and at the streaming defaults (501 samples at 2083-4167 Hz) that
+        # corner is 4-8 Hz -- ABOVE the 3 Hz low-pass `lowpass_figure` draws. Filtering
+        # the detrended series would remove the band that plot exists to show: measured
+        # on fourpoint_lockin_stream_20260820_164842, 14.8 kHz sigma against 67.3 kHz,
+        # correlation 0.43, with the 0-0.5 Hz content cut from 36.5 to 5.1 kHz rms.
+        clean["peak_shift_kHz_predetrend"] = clean["peak_shift_kHz"].to_numpy()
         clean["peak_shift_kHz"] = detrend_series(clean["peak_shift_kHz"].to_numpy(),
                                                  detrend_window)
+        report["detrend_corner_hz"] = float(fs / detrend_window)
         report["detrend_window_samples"] = int(detrend_window)
         notes.append(f"shift high-passed at ~{fs / detrend_window:.1f} Hz "
                      f"(rolling-median window {detrend_window})")

@@ -1,2 +1,0 @@
-csv,n_batches,n_bad_f0,duration_s,rate_Hz,shift_reference,shift_mean_kHz,shift_std_kHz,shift_ptp_kHz,B_std_nT,sensitivity_nT_per_rtHz,method_AB_median_disagreement_kHz,f0_calibration_mhz,fwhm_calibration_mhz
-twopoint_lockin_live_20260804_135539.csv,205,97,21.666672875056975,9.727757568465327,calibration,-1426.8185433863807,1050.2418815123367,5755.091796605484,37476.51589752843,16992.9131293835,1253.0324994481923,2933.2264257132515,6.652804895891187

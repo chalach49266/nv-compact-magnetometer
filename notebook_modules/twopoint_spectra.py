@@ -186,6 +186,148 @@ def fft_amplitude_nt(shift_khz, fs: float, detrend: str = "linear",
     return np.fft.rfftfreq(n, d=1.0 / fs), amp
 
 
+def segmented_fft_amplitude_nt(shift_khz, segment, fs: float,
+                               detrend: str = "linear", window: str = "hann",
+                               gamma_mhz_per_ut: float = GAMMA_NV_MHZ_PER_UT
+                               ) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Plain FFT amplitude of burst data: one transform per burst, then averaged.
+
+    The reason `fft_amplitude_nt` is not simply pointed at a burst record is that
+    the record is not contiguous -- the host spends ~26% of the wall clock
+    reconfiguring between bursts, and transforming across that dead time puts a
+    frequency scale on a gap. This routine does the same thing `segment_psd` does
+    for the Welch panel: each burst is transformed on its own, never across a
+    boundary, and only the resulting spectra are combined.
+
+    Amplitude scaling is the same as `fft_amplitude_nt`, so a tone still reads its
+    true size in nT. Bursts are combined in quadrature (rms of the per-burst
+    amplitudes), which leaves a coherent line at its amplitude while averaging the
+    broadband hash down by sqrt(n_bursts).
+
+    The cost is resolution: the bin spacing is `fs / n`, where `n` is the *shortest*
+    burst, not the whole run. A 500-rep burst at 240 us spans 120 ms and therefore
+    gives 8.3 Hz bins -- enough to see a 60 Hz line, not enough to separate it from
+    52 or 68 Hz. Use `gapfilled_fft_amplitude_nt` when the resolution matters.
+    """
+    x = np.asarray(khz_to_nt(shift_khz, gamma_mhz_per_ut), dtype=float)
+    seg = np.asarray(segment)
+    if seg.size != x.size:
+        raise ValueError(f"segment has {seg.size} entries for {x.size} samples")
+
+    ids = [s for s in np.unique(seg) if np.all(np.isfinite(x[seg == s]))]
+    info = {"n_segments": len(ids), "n_per_segment": 0, "bin_hz": float("nan")}
+    if not ids:
+        return np.array([]), np.array([]), info
+
+    n = min(int((seg == s).sum()) for s in ids)
+    if n < 8:
+        return np.array([]), np.array([]), info
+
+    if window == "hann":
+        w = np.hanning(n)
+    elif window in (None, "none", "boxcar"):
+        w = np.ones(n)
+    else:
+        raise ValueError(f"unknown window {window!r}")
+
+    acc = np.zeros(n // 2 + 1)
+    for s in ids:
+        y = _detrend(x[seg == s][:n], detrend)
+        a = 2.0 * np.abs(np.fft.rfft(y * w)) / w.sum()
+        a[0] /= 2.0
+        if n % 2 == 0:
+            a[-1] /= 2.0
+        acc += a ** 2
+    amp = np.sqrt(acc / len(ids))
+
+    info.update(n_per_segment=int(n), bin_hz=float(fs / n))
+    return np.fft.rfftfreq(n, d=1.0 / fs), amp, info
+
+
+def gapfilled_fft_amplitude_nt(shift_khz, time_s, fs: float,
+                               detrend: str = "linear", window: str = "hann",
+                               gamma_mhz_per_ut: float = GAMMA_NV_MHZ_PER_UT
+                               ) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Plain FFT of a burst record over its *true* time axis, gaps left empty.
+
+    Every sample is placed in the grid slot its timestamp says it belongs in, and
+    the dead time between bursts stays as zeros instead of being closed up. The
+    frequency scale is therefore the real one -- a 60 Hz line lands at 60 Hz --
+    and the resolution is that of the whole run (`fs / N` over the full duration),
+    not of one burst.
+
+    Normalisation divides by the window sum over the *occupied* slots only, so the
+    duty-cycle hole does not scale a tone down: a real 500 nT line still reads
+    500 nT, to within the usual Hann scalloping loss (up to 15% for a line that
+    falls between two bins -- measured 454 nT for an injected 500 nT tone at
+    77 Hz on the 2026-08-19 burst run, at the correct 77.04 Hz).
+
+    What it costs, and it is not nothing: multiplying by the burst pattern
+    convolves the spectrum with the pattern's transform, so every real line comes
+    with a comb of ghosts at +/- k x (burst repetition rate), typically a few Hz
+    apart. The tallest member of each comb sits at the true frequency; the ghosts
+    are an artefact of the duty cycle, not signal. Read line *positions* here, and
+    cross-check a line's size against the per-burst panel.
+    """
+    x = np.asarray(khz_to_nt(shift_khz, gamma_mhz_per_ut), dtype=float)
+    t = np.asarray(time_s, dtype=float)
+    if t.size != x.size:
+        raise ValueError(f"time_s has {t.size} entries for {x.size} samples")
+
+    good = np.isfinite(x) & np.isfinite(t)
+    x, t = x[good], t[good]
+    info = {"n_samples": int(x.size), "n_grid": 0, "fill_fraction": float("nan"),
+            "bin_hz": float("nan"), "burst_rate_hz": float("nan"),
+            "ghost_fraction": float("nan")}
+    if x.size < 8:
+        return np.array([]), np.array([]), info
+
+    x = _detrend(x, detrend)
+
+    # Slot index on the exact FPGA cadence. `time_s` is already rebuilt on that
+    # cadence by `burst_qc.retime`, so rounding is exact inside a burst and only
+    # the burst *starts* (wall-clock) carry any rounding at all.
+    k = np.rint((t - t[0]) * fs).astype(np.int64)
+    n = int(k.max()) + 1
+    if n <= 0 or n > 50_000_000:
+        return np.array([]), np.array([]), info
+
+    total = np.bincount(k, weights=x, minlength=n)
+    count = np.bincount(k, minlength=n).astype(float)
+    filled = count > 0
+    y = np.zeros(n)
+    y[filled] = total[filled] / count[filled]
+
+    if window == "hann":
+        w = np.hanning(n)
+    elif window in (None, "none", "boxcar"):
+        w = np.ones(n)
+    else:
+        raise ValueError(f"unknown window {window!r}")
+
+    norm = float(w[filled].sum())
+    if norm <= 0:
+        return np.array([]), np.array([]), info
+
+    amp = 2.0 * np.abs(np.fft.rfft(y * w)) / norm
+    amp[0] /= 2.0
+    if n % 2 == 0:
+        amp[-1] /= 2.0
+
+    # Size the artefact rather than just warning about it. Gating a signal with a
+    # periodic burst pattern of duty d replicates every line at +/- k x f_rep with
+    # relative height |sinc(k d)|; at 87% duty the first ghost is ~15% of its
+    # parent, at 50% it is 64% and the panel needs reading with care.
+    duty = float(filled.mean())
+    n_bursts = int(np.count_nonzero(np.diff(t) > 1.5 / fs)) + 1
+    span = float(t[-1] - t[0])
+    info.update(n_grid=int(n), fill_fraction=duty, bin_hz=float(fs / n),
+                burst_rate_hz=float(n_bursts / span) if span > 0 and n_bursts > 1
+                              else float("nan"),
+                ghost_fraction=float(abs(np.sinc(duty))) if n_bursts > 1 else 0.0)
+    return np.fft.rfftfreq(n, d=1.0 / fs), amp, info
+
+
 def segmented_asd_nt(shift_khz, segment, fs: float, detrend: bool = True,
                      gamma_mhz_per_ut: float = GAMMA_NV_MHZ_PER_UT
                      ) -> tuple[np.ndarray, np.ndarray]:
@@ -345,6 +487,10 @@ class SpectrumSummary:
     # `fft_amplitude_nt`.
     fft_f: Optional[np.ndarray] = None
     fft_amp_nt: Optional[np.ndarray] = None
+    # How that plain FFT was computed, for the figure to label itself honestly:
+    # "record" (contiguous run), "per-burst", "gap-filled" or "concatenated".
+    fft_kind: str = "record"
+    fft_note: str = ""
 
     def to_dict(self) -> dict:
         strongest = (self.lines.sort_values("excess_over_floor").iloc[-1].to_dict()
@@ -388,11 +534,32 @@ class SpectrumSummary:
 
 def summarise(shift_khz, fs: float, segment=None, nseg: int = 8,
               detrend: str = "linear", floor_band: Optional[tuple] = None,
-              gamma_mhz_per_ut: float = GAMMA_NV_MHZ_PER_UT) -> SpectrumSummary:
+              gamma_mhz_per_ut: float = GAMMA_NV_MHZ_PER_UT,
+              burst_fft: str = "gapfill", time_s=None) -> SpectrumSummary:
     """Full spectral summary of a peak-shift trace.
 
-    Pass `segment` (from `burst_qc.retime`) for burst data so the transform never
-    straddles the dead time between bursts.
+    Pass `segment` (from `burst_qc.retime`) for burst data so the Welch transform
+    never straddles the dead time between bursts.
+
+    `burst_fft` picks how the *plain* FFT panel is built for burst data, where a
+    single transform of the whole record is not defined. It is ignored for the
+    contiguous modes, which always get the straight transform of the run.
+
+        "gapfill"   (default) one transform on the true time axis with the dead
+                    time left as zeros. Needs `time_s`. Full-run resolution and
+                    true line frequencies, at the price of a ghost comb at the
+                    burst repetition rate whose height the panel reports.
+        "segments"  one plain FFT per burst, combined in quadrature. No gap
+                    artefacts at all, but the bins are as wide as one burst is
+                    short (4-8 Hz), and a bin that wide collects so much
+                    broadband noise that a real line barely clears it. Use it to
+                    confirm a line gapfill already found.
+        "concat"    the naive transform that pretends the bursts are contiguous.
+                    DIAGNOSTIC ONLY: removing the gaps rescales the time axis by
+                    the duty cycle and breaks the phase at every burst boundary,
+                    so lines land at the wrong frequency and are smeared. It is
+                    here because it is what "just FFT the column" does.
+        "none"      leave the panel empty, the behaviour before 2026-08-19.
     """
     x = np.asarray(shift_khz, dtype=float)
     finite = x[np.isfinite(x)]
@@ -406,14 +573,51 @@ def summarise(shift_khz, fs: float, segment=None, nseg: int = 8,
 
     band = tuple(floor_band) if floor_band else default_floor_band(fs)
 
-    # The plain transform of the whole record, alongside the Welch estimate. Burst
-    # data is deliberately left out: its record is not contiguous, so a transform
-    # across the whole thing would put a frequency scale on the inter-burst gaps.
+    # The plain transform, alongside the Welch estimate. A contiguous record is
+    # transformed whole; a burst record cannot be, so `burst_fft` says which of
+    # the three well-defined substitutes to use instead of dropping the panel.
+    fft_kind, fft_note = "record", ""
     if segment is None:
         fft_f, fft_amp = fft_amplitude_nt(x, fs, detrend=detrend,
                                           gamma_mhz_per_ut=gamma_mhz_per_ut)
+        if fft_f is not None and len(fft_f) > 1:
+            fft_note = f"{finite.size} samples, {fs / finite.size:.3g} Hz bins"
     else:
-        fft_f, fft_amp = None, None
+        mode = str(burst_fft or "none").lower()
+        if mode in ("segment", "segments", "per_burst", "per-burst"):
+            fft_f, fft_amp, info = segmented_fft_amplitude_nt(
+                x, segment, fs, detrend=detrend, gamma_mhz_per_ut=gamma_mhz_per_ut)
+            fft_kind = "per-burst"
+            fft_note = (f"{info['n_segments']} bursts x {info['n_per_segment']} "
+                        f"samples, quadrature-averaged, {info['bin_hz']:.3g} Hz bins")
+        elif mode in ("gapfill", "gap_fill", "gap-fill", "zerofill", "zero-fill"):
+            if time_s is None:
+                raise ValueError("burst_fft='gapfill' needs time_s (the retimed "
+                                 "axis from burst_qc.retime)")
+            fft_f, fft_amp, info = gapfilled_fft_amplitude_nt(
+                x, time_s, fs, detrend=detrend, gamma_mhz_per_ut=gamma_mhz_per_ut)
+            fft_kind = "gap-filled"
+            fft_note = (f"{info['n_samples']} samples on a {info['n_grid']}-slot "
+                        f"grid ({100 * info['fill_fraction']:.0f}% filled), "
+                        f"{info['bin_hz']:.3g} Hz bins")
+            if np.isfinite(info["burst_rate_hz"]):
+                fft_note += (f"; each line ghosts at +/-{info['burst_rate_hz']:.2g} Hz "
+                             f"x k at ~{100 * info['ghost_fraction']:.0f}% height")
+        elif mode in ("concat", "concatenate", "naive"):
+            fft_f, fft_amp = fft_amplitude_nt(x, fs, detrend=detrend,
+                                              gamma_mhz_per_ut=gamma_mhz_per_ut)
+            fft_kind = "concatenated"
+            fft_note = (f"{finite.size} samples with the gaps closed up -- the "
+                        f"frequency axis is stretched by 1/duty and the phase "
+                        f"breaks at every burst edge. Do not quote frequencies.")
+        elif mode in ("none", "off", "false"):
+            fft_f, fft_amp = None, None
+            fft_kind = "none"
+        else:
+            raise ValueError(f"unknown burst_fft {burst_fft!r}; expected "
+                             f"segments/gapfill/concat/none")
+        if fft_f is not None and len(fft_f) < 2:
+            fft_note = "burst too short to transform"
 
     return SpectrumSummary(
         fs_hz=float(fs),
@@ -427,4 +631,6 @@ def summarise(shift_khz, fs: float, segment=None, nseg: int = 8,
         asd=asd,
         fft_f=fft_f,
         fft_amp_nt=fft_amp,
+        fft_kind=fft_kind,
+        fft_note=fft_note,
     )

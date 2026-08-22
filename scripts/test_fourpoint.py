@@ -116,8 +116,12 @@ csv = tmp / "fourpoint_lockin_stream_20260818_120000.csv"
 df.to_csv(csv, index=False)
 
 nb = json.loads((REPO / "Modules" / "Fourpoint_Lockin_module.ipynb").read_text())
+# Match on the FIRST LINE, not on "Step 5C" appearing anywhere: the Step 4CL
+# live-streaming cell added on 2026-08-20 refers to Step 5C in its header comment,
+# and a substring match picks that acquisition cell instead of the analysis one.
 cell = next(("".join(c["source"]) for c in nb["cells"]
-             if c["cell_type"] == "code" and "Step 5C" in "".join(c["source"])))
+             if c["cell_type"] == "code"
+             and "".join(c["source"]).lstrip().startswith("# Step 5C")))
 ip.run_cell(f"""
 import sys
 sys.path.insert(0, {str(REPO / 'notebook_modules')!r})

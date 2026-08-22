@@ -28,20 +28,29 @@ with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.St
     ip.run_cell("%matplotlib inline")
 
 RUNS = REPO / "data/results/081726 (Test after Increased Sensitivity)/Two-point lockin"
-# (cell index, label, recorded run, name to copy it under). Indices are for the
-# 32-cell layout. The 2026-08-17 burst runs predate the _avg_/_burst_/_stream_
-# rename and are still called _live_, so the copy takes the name the cell's
-# newest-run fallback globs for.
+# (cell marker, label, recorded run, name to copy it under). Cells are found by the
+# first line of their source rather than by index, so inserting a cell above them
+# does not silently point this test at the wrong one. The 2026-08-17 burst runs
+# predate the _avg_/_burst_/_stream_ rename and are still called _live_, so the copy
+# takes the name the cell's newest-run fallback globs for.
 CASES = [
-    (28, "Step 5C  stream", "twopoint_lockin_stream_20260817_121002.csv",
+    ("# Step 5C", "Step 5C  stream", "twopoint_lockin_stream_20260817_121002.csv",
          "twopoint_lockin_stream_20260817_121002.csv"),
-    (24, "Step 5B  burst",  "twopoint_lockin_live_20260817_114413.csv",
+    ("# Step 5B", "Step 5B  burst",  "twopoint_lockin_live_20260817_114413.csv",
          "twopoint_lockin_burst_20260817_114413.csv"),
 ]
 
 nb = json.loads((REPO / "Modules/Twopoint_Lockin_module.ipynb").read_text())
 
-for idx, label, source_name, csv_name in CASES:
+
+def cell_source(marker):
+    hits = [c for c in nb["cells"] if c["cell_type"] == "code"
+            and "".join(c["source"]).lstrip().startswith(marker)]
+    if len(hits) != 1:
+        raise SystemExit(f"expected exactly one cell starting with {marker!r}, found {len(hits)}")
+    return "".join(hits[0]["source"])
+
+for marker, label, source_name, csv_name in CASES:
     tmp = Path(tempfile.mkdtemp(prefix="nbfig_"))
     shutil.copy(RUNS / source_name, tmp / csv_name)
     stem = Path(csv_name).stem
@@ -56,19 +65,22 @@ import figure_autosave
 figure_autosave.enable(TWOPOINT_DIR, verbose=False)
 """)
     with contextlib.redirect_stdout(io.StringIO()):
-        res = ip.run_cell("".join(nb["cells"][idx]["source"]))
+        res = ip.run_cell(cell_source(marker))
     if res.error_in_exec:
         check(f"{label}: cell runs", False, repr(res.error_in_exec))
         shutil.rmtree(tmp, ignore_errors=True)
         continue
-    want = sorted([f"{stem}_fft.png", f"{stem}_result.png"])
+    # Since 2026-08-20 each analysis cell also draws the 3 Hz low-pass view, so a
+    # run writes three PNGs, not two.
+    want = sorted([f"{stem}_fft.png", f"{stem}_lowpass.png", f"{stem}_result.png"])
     got = sorted(p.name for p in tmp.glob("*.png"))
-    check(f"{label}: writes _result.png and _fft.png beside the CSV", got == want, str(got))
-    check(f"{label}: both PNGs are non-trivial",
+    check(f"{label}: writes _result.png, _lowpass.png and _fft.png beside the CSV",
+          got == want, str(got))
+    check(f"{label}: all PNGs are non-trivial",
           all((tmp / n).stat().st_size > 20_000 for n in got))
 
     with contextlib.redirect_stdout(io.StringIO()):
-        ip.run_cell("".join(nb["cells"][idx]["source"]))
+        ip.run_cell(cell_source(marker))
     got2 = sorted(p.name for p in tmp.glob("*.png"))
     check(f"{label}: re-running overwrites rather than accumulates", got2 == want, str(got2))
     shutil.rmtree(tmp, ignore_errors=True)

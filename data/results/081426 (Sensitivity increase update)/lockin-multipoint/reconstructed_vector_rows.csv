@@ -1,2 +1,0 @@
-save_id,timestamp_epoch_s,n_channels,n_solve_channels,selected_blocks,solver,rank,condition_number,residual_norm_uT,solve_residual_norm_uT,delta_Bx_uT,delta_By_uT,delta_Bz_uT,status
-000000,0.1156057000043802,8,8,all,weighted_lstsq,3,8.778783934034399,9.992991960096896,9.992991960096896,-3.6317197512189843,-7.212354569677936,-1.564975952012403,ok

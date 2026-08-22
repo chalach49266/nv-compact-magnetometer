@@ -31,8 +31,14 @@ Thumbs.db
 *.swp
 *~
 
-# Data — uncomment to exclude large CSVs
-# data/*.csv
+# ---- Measurement data: local only, not tracked ----
+# Raw acquisition output under data/ is ~5 GB and individual stream CSVs
+# exceed GitHub's 100 MB per-file limit. The data lives on disk / OneDrive.
+# Only the write-ups that explain each run are tracked.
+data/**
+!data/**/
+!data/**/*.md
+!data/**/*.txt
 
 # Compiled docs / build artifacts
 docs/_build/

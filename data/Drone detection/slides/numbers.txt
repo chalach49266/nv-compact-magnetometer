@@ -1,0 +1,108 @@
+==============================================================================
+PER-RUN PANELS
+[173633] on top, $\sim$10 cm, swept L--R: sigma_axis(2 Hz BW) = 1.36/3.09/1.83 uT  peak |dB|_filt = 48.0 uT  max z = 14.9
+[174657] on top, moved in / out / in: sigma_axis(2 Hz BW) = 1.71/4.14/2.47 uT  peak |dB|_filt = 36.7 uT  max z = 5.6
+[182456] on top, large L--R sweep: sigma_axis(2 Hz BW) = 1.89/1.35/2.12 uT  peak |dB|_filt = 31.0 uT  max z = 11.8
+[183014] on top 10 / 20 / 30 cm, L--R: sigma_axis(2 Hz BW) = 1.72/1.36/2.35 uT  peak |dB|_filt = 16.9 uT  max z = 7.1
+[183316] 1 m sweep, L--R: sigma_axis(2 Hz BW) = 2.05/1.69/2.83 uT  peak |dB|_filt = 37.5 uT  max z = 6.2
+[174908] in front, hand oscillation: sigma_axis(2 Hz BW) = 2.62/6.27/3.71 uT  peak |dB|_filt = 101.9 uT  max z = 11.3
+[175409] in front, up--down: sigma_axis(2 Hz BW) = 1.70/1.94/2.39 uT  peak |dB|_filt = 22.5 uT  max z = 4.7
+[180601] in front 10 / 20 cm, up--down: sigma_axis(2 Hz BW) = 2.03/0.78/1.11 uT  peak |dB|_filt = 20.7 uT  max z = 9.5
+[181031] in front 10 / 20 / 30 cm, up--down: sigma_axis(2 Hz BW) = 0.86/1.73/1.16 uT  peak |dB|_filt = 30.0 uT  max z = 14.3
+[181300] in front 10 / 20 / 30 cm, up--down: sigma_axis(2 Hz BW) = 0.97/2.14/1.22 uT  peak |dB|_filt = 24.9 uT  max z = 10.2
+[174515] no drone: sigma_axis(2 Hz BW) = 1.07/2.76/1.52 uT  peak |dB|_filt = 30.9 uT  max z = 6.6
+[175626] no drone: sigma_axis(2 Hz BW) = 2.35/2.32/2.92 uT  peak |dB|_filt = 21.4 uT  max z = 3.5
+[181817] no drone: sigma_axis(2 Hz BW) = 1.30/3.08/1.81 uT  peak |dB|_filt = 20.4 uT  max z = 7.1
+
+==============================================================================
+DISTANCE LADDER
+[ladder] 180601 10 cm : dB vs far = ( +4.54, -1.64,-10.72) uT  |dB| = 11.76 uT
+[ladder] 180601 20 cm : dB vs far = ( -1.27, -3.88, +0.36) uT  |dB| =  4.10 uT
+[ladder] 181031 10 cm : dB vs far = (-11.39,+12.59,+12.31) uT  |dB| = 20.97 uT
+[ladder] 181031 20 cm : dB vs far = ( -3.96, +2.26, +0.53) uT  |dB| =  4.59 uT
+[ladder] 181031 30 cm : dB vs far = ( -1.02, +0.11, -0.39) uT  |dB| =  1.09 uT
+[ladder] 181300 10 cm : dB vs far = (-10.04,+11.80, +5.64) uT  |dB| = 16.49 uT
+[ladder] 181300 20 cm : dB vs far = ( -4.15, +4.24, -0.16) uT  |dB| =  5.94 uT
+[ladder] 181300 30 cm : dB vs far = ( -1.35, +0.14, +0.72) uT  |dB| =  1.53 uT
+[ladder] 183014 10 cm : dB vs far = ( -3.41, -2.13, -2.92) uT  |dB| =  4.96 uT
+[ladder] 183014 20 cm : dB vs far = ( -1.28, +0.06, -1.24) uT  |dB| =  1.79 uT
+[ladder] 183014 30 cm : dB vs far = ( +0.04, +0.21, +0.80) uT  |dB| =  0.83 uT
+[ladder] power-law fit over 8 points: |dB| ~ r^(-2.17 +/- 0.24)   (point dipole would be -3)
+[ladder] fitted |dB|(10 cm) = 17.3 uT  ->  effective moment m_eff = 0.173 A m^2 (equatorial convention)
+[ladder] empirical 1-sigma on a 5 s window mean, per axis, drone-free = 2.64 uT (18 windows); 3-sigma on |dB| = 13.7 uT
+
+==============================================================================
+GALLERY / SUMMARY
+
+==============================================================================
+DETECTOR
+[detector] null pool 13203 samples from 3 drone-free runs; z* (99.9 pct) = 3.83; max null z = 7.07
+[detector] 173633 DRONE  max z   14.9   duty  42.1%   longest dwell  4.68 s
+[detector] 174657 DRONE  max z    5.6   duty  29.3%   longest dwell  4.54 s
+[detector] 182456 DRONE  max z   11.8   duty  15.1%   longest dwell  0.59 s
+[detector] 183014 DRONE  max z    7.1   duty   2.6%   longest dwell  0.23 s
+[detector] 183316 DRONE  max z    6.2   duty   0.1%   longest dwell  0.04 s
+[detector] 174908 DRONE  max z   11.3   duty   6.2%   longest dwell  0.45 s
+[detector] 175409 DRONE  max z    4.7   duty   1.5%   longest dwell  0.22 s
+[detector] 180601 DRONE  max z    9.5   duty  28.3%   longest dwell  4.77 s
+[detector] 181031 DRONE  max z   14.3   duty  15.9%   longest dwell  4.78 s
+[detector] 181300 DRONE  max z   10.2   duty  15.5%   longest dwell  4.39 s
+[detector] 174515 none   max z    6.6   duty   0.1%   longest dwell  0.04 s
+[detector] 175626 none   max z    3.5   duty   0.0%   longest dwell  0.00 s
+[detector] 181817 none   max z    7.1   duty   0.2%   longest dwell  0.05 s
+[detector] duty: drone 0.1-42.1% (median 15.3%), drone-free 0.0-0.2%
+[detector] longest dwell: drone 0.04-4.78 s, drone-free 0.00-0.05 s
+
+==============================================================================
+GEOMETRY: on top vs in front
+[geom] 0.3-4 Hz vector rms: on top 6.54 uT (n=5), in front 3.56 uT (n=5), drone-free 5.02 uT
+[geom] |grad B| at 10 cm from the fit = 5.2 uT/cm
+[geom] 173633: 0.3-4 Hz rms 10.58 uT -> hand travel 2.0 cm rms (at a 10 cm stand-off)
+[geom] 182456: 0.3-4 Hz rms 5.68 uT -> hand travel 1.1 cm rms (at a 10 cm stand-off)
+[geom] 175409: 0.3-4 Hz rms 4.67 uT -> hand travel 0.9 cm rms (at a 10 cm stand-off)
+[geom] 181031: 0.3-4 Hz rms 3.00 uT -> hand travel 0.6 cm rms (at a 10 cm stand-off)
+[geom] measured static step, drone ON TOP (174657, near vs far): 16.5 and 24.2 uT
+[geom] measured static step, drone IN FRONT at 10 cm: 11.8, 21.0, 16.5 uT
+[geom] on-top / in-front ratio = 1.24 (point dipole predicts 2.00)
+[geom] implied hand travel, on top L-R: 2.0, 1.1, 1.1, 1.3 cm rms  (median 1.2)
+[geom] implied hand travel, in front U-D: 0.9, 3.0, 0.6, 0.7 cm rms  (median 0.8)
+
+==============================================================================
+CLOCK CHECK: what frequency is the ~60 Hz line really at?
+[clock] two-point, 9 streams: line at 61.723 +/- 0.011 Hz on the nominal time base
+[clock] two-point wall-clock slope 1.02736 -> true rate 4055.7 Hz (nominal 4166.67), line at 60.079 +/- 0.050 Hz
+[clock] 16-point, 7 streams: line at 61.019 +/- 0.007 Hz on the nominal time base
+[clock] 16-point wall-clock slope 1.01474 -> true rate 144.58 Hz (nominal 146.71), line at 60.133 +/- 0.007 Hz
+[clock] the two instruments disagree by 0.70 Hz on the nominal time base and by 0.05 Hz after the wall-clock correction -> the line is the 60 Hz building mains, not the cryostat pump.
+
+==============================================================================
+TWO-POINT
+[2pt] 171802 drone     fs=4166.7 Hz  mean dB =  +12.34 uT  lock-in DC = -0.01515  gain = 1.045  A(61.7) = 0.897 uT  white = 0.0814  SNR = 11.0
+[2pt] 172711 drone     fs=4166.7 Hz  mean dB =  +23.49 uT  lock-in DC = -0.03766  gain = 0.947  A(61.7) = 1.196 uT  white = 0.0825  SNR = 14.5
+[2pt] 173311 drone     fs=4166.7 Hz  mean dB =   +5.79 uT  lock-in DC = -0.00341  gain = 0.985  A(61.7) = 1.094 uT  white = 0.0263  SNR = 41.6
+[2pt] 172841 no drone  fs=4166.7 Hz  mean dB =   -4.58 uT  lock-in DC = +0.02208  gain = 0.782  A(61.7) = 2.330 uT  white = 0.0639  SNR = 36.4
+[2pt] 173017 no drone  fs=4166.7 Hz  mean dB =   -3.91 uT  lock-in DC = +0.02332  gain = 0.814  A(61.7) = 2.339 uT  white = 0.0652  SNR = 35.9
+
+[2pt-all] 171802 drone       meanB  +12.34 uT  A61 0.897  A123 0.438  A185 0.227  white 0.0814  gain-free SNR  11.0
+[2pt-all] 172711 drone       meanB  +23.49 uT  A61 1.196  A123 0.560  A185 0.217  white 0.0825  gain-free SNR  14.5
+[2pt-all] 173311 drone       meanB   +5.79 uT  A61 1.094  A123 0.479  A185 0.261  white 0.0263  gain-free SNR  41.6
+[2pt-all] 172841 no drone    meanB   -4.58 uT  A61 2.330  A123 0.925  A185 0.584  white 0.0639  gain-free SNR  36.4
+[2pt-all] 173017 no drone    meanB   -3.91 uT  A61 2.339  A123 0.945  A185 0.507  white 0.0652  gain-free SNR  35.9
+[2pt-all] 171057 unlabelled  meanB   -0.70 uT  A61 0.925  A123 0.290  A185 0.369  white 0.1572  gain-free SNR   5.9
+[2pt-all] 171419 unlabelled  meanB   -1.06 uT  A61 1.091  A123 0.385  A185 0.201  white 0.0384  gain-free SNR  28.4
+[2pt-all] 171955 unlabelled  meanB   -1.35 uT  A61 1.521  A123 0.684  A185 0.363  white 0.0994  gain-free SNR  15.3
+[2pt-all] 173426 unlabelled  meanB   -2.67 uT  A61 1.597  A123 0.623  A185 0.418  white 0.0372  gain-free SNR  42.9
+[2pt] A(61.7): drone 0.90-1.20, no drone 2.33-2.34, unlabelled same session 0.92-1.60
+[2pt] gain-free SNR(61.7): drone 11-42, no drone 36-36  -> the suppression does not survive normalisation
+[fold] 171802 drone     pk-pk at 61.73 Hz = 2.475 uT  sem 0.2874 uT
+[fold] 172711 drone     pk-pk at 61.73 Hz = 3.508 uT  sem 0.2963 uT
+[fold] 173311 drone     pk-pk at 61.73 Hz = 2.336 uT  sem 0.1942 uT
+[fold] 172841 no drone  pk-pk at 61.73 Hz = 5.632 uT  sem 0.2186 uT
+[fold] 173017 no drone  pk-pk at 61.73 Hz = 5.413 uT  sem 0.2200 uT
+[2pt] corr(gain, A61) over the five labelled runs = -0.981; gain range 0.782-1.045 (34% swing)
+
+==============================================================================
+SPECTRAL DIFFERENCE: is there ANY drone-borne AC emission?
+[diff] two-point drone/no-drone ASD ratio, 5-2000 Hz: median 1.21, 10-90 pct 0.98-1.44
+[diff] ratio in 200-2000 Hz (white, gain only): 1.23
+[diff] no band anywhere shows a drone-only line: the drone emits nothing in 0-2 kHz, it only sits there as a static dipole.
